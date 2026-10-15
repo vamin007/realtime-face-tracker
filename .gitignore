@@ -1,0 +1,7 @@
+build/
+logs/
+models/*.onnx
+clips/
+.venv/
+third_party/
+.DS_Store
