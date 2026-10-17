@@ -181,6 +181,16 @@ class  LabelLibrary  { load(dir); enroll(...); match(baseClass, emb) -> LabelMat
 - **Webcam auto-exposure** shifts brightness. The ratio-based design handles most of it, and the thresholds will be tuned on `flashlight.mp4`.
 - **CoreML's first model compile** can take seconds. The compiled-model cache directory avoids repeating it.
 
+## Baseline (M0, measured 2026-10-17)
+Original tracker on the reference clips (`--video`, default flags, so "person" is the face box). FPS is processing speed on video; live camera runs were about 10 FPS.
+
+| Clip | Length | FPS | Confirmed IDs | Hand IDs (short ≤5 frames) | Person/face IDs | Other |
+|---|---|---|---|---|---|---|
+| `hands_face.mov` | 2026 frames, 67.6 s | 14.2 | 83 | 75 (25) | 7 | toothbrush 1 |
+| `flashlight.mov` | 1576 frames, 52.6 s | 14.3 | 39 | 25 (11) | 1 | cell phone 10, chair 2, toothbrush 1 |
+
+Logs: `logs/run_20261017_182032.csv`, `logs/run_20261017_182256.csv` (not in git; numbers above are the record).
+
 ## Verification
 - **Unit tests (`ctest`):**
   - Hungarian matching and DIoU.
