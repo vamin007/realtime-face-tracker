@@ -114,26 +114,34 @@ struct Track {
 ```
 
 ### M4: Bright-light face targeting
-- `TargetSelector` runs after the tracker on each confirmed face track. It also runs on custom labels whose base class is face.
+**Rule (user, 2026-10-17): only a change in brightness on a face triggers TARGET.**
+- **Only faces can be targeted.** Brightness is measured only on face tracks (and custom labels whose base class is face). The phone shining the light, a lamp, a window or a screen is never targeted, even if it's the brightest thing in the frame. In `flashlight.mov` the phone is detected as `cell phone`, which is correct, and it must stay an ordinary track.
+- `TargetSelector` runs after the tracker and measures, for each confirmed face track:
   - **Face brightness:** average luma over the middle 60% of the face box, to avoid hair and background.
-  - **Background brightness:** median luma of a 160×90 downscale of the frame, with every face box masked out.
-  - **Ratio** = face ÷ background, so the trigger is relative to room lighting.
+  - **Background brightness:** median luma of a 160×90 downscale of the frame, with every face box masked out. A median barely moves for a small, very bright spot, such as the flashlight LED itself or a lamp in view.
+  - **Ratio** = face ÷ background, so brightness is judged relative to room lighting.
   - **Clipping:** if more than 40% of face pixels are clipped near 255, the face counts as very bright. Webcam auto-exposure tends to clip a face in a flashlight beam.
+- **The trigger is a change on the face.** Each face has a *normal ratio*: its usual brightness relative to the room. A face becomes a candidate only when **both** of these hold:
+  1. Its ratio has **risen to ≥1.5× its own normal ratio**. A light has just started shining on it.
+  2. Its ratio is **≥1.6**: it's now clearly brighter than the background.
+
+  A face that's simply brighter than its surroundings all the time (monitor glow in a dark room, a sunny spot) never triggers, because nothing changed on it.
+  - Ratios are compared rather than raw brightness. When a light hits the face, webcam auto-exposure darkens the whole image, so raw face brightness may barely rise even though the face-to-background ratio jumps.
+  - The normal ratio is a slow running average (about 3 s), updated only while the face isn't rising or targeted.
+  - A newly seen face needs 1 s of history before it can be targeted. So a face that arrives already lit isn't targeted until the light on it changes.
+  - A room light switching on or off changes face and background together, so the ratio, and therefore the trigger, stays put.
 - **Concept: hysteresis.** Different thresholds to turn on and turn off, so the state doesn't flicker:
-  - Target when the ratio stays ≥1.8 for 0.1 s.
-  - Release when it stays below 1.4 for 0.25 s.
-  - Both are timed in seconds rather than frames, so a slower frame doesn't change the reaction speed. Thresholds are tuned on `flashlight.mov`.
+  - Target when both conditions hold for 0.1 s.
+  - Release when the rise drops below 1.25× normal for 0.25 s, for example when the light goes off.
+  - Both are timed in seconds rather than frames. Thresholds are tuned on `flashlight.mov`.
 - **Brightest only:** of the faces that qualify, the highest ratio wins. The current target keeps it unless another face beats it by 0.2.
-- **Rise guard (Claude's addition):** a face's ratio must also be ≥1.3× its own normal ratio. Without this, a face lit by a monitor in a dark room would trigger. It's on by default and can be turned off with `--target-no-rise-check`.
-  - The guard compares **ratios, not raw brightness**. When a light hits the face, webcam auto-exposure darkens the whole image, so raw face brightness may barely rise even though the face-to-background ratio jumps.
-  - The normal ratio is a slow running average, updated only while the face isn't the target.
-  - A face that is already lit when first seen starts from a normal ratio of 1.0, so it can still become the target.
-- **Overexposure:** a strongly lit face can stop being detected. The target box then keeps following the Kalman prediction for up to 0.5 s while that region stays bright.
+- **Overexposure:** a strongly lit face can stop being detected. The target box then keeps following the Kalman prediction for up to 0.5 s while that region stays bright. (In the baseline, the face track survived the whole flashlight clip, so this is a safety net.)
 - **Display:** the box is red and 3 px thick, and the label is exactly `TARGET`. Normal track colors **skip red hues** (`colorForId` in `Overlay.cpp`), so red only ever means TARGET.
-- Flags: `--no-targeting`, `--target-ratio`.
+- Flags: `--no-targeting`, `--target-ratio` (default 1.6), `--target-rise` (default 1.5).
 
 ```cpp
-struct TargetState { int trackUid = -1; float ratio = 0; int enterFrames = 0, exitFrames = 0; double coastUntil = 0; };
+struct FaceLight   { float normalRatio = 0; float ratio = 0; double firstSeen = 0; };  // per face track uid
+struct TargetState { int trackUid = -1; double conditionSince = 0, releaseSince = 0, coastUntil = 0; };
 ```
 
 ### M5: Custom labels
@@ -195,11 +203,16 @@ Logs: `logs/run_20261017_182032.csv`, `logs/run_20261017_182256.csv` (not in git
 - **Unit tests (`ctest`):**
   - Hungarian matching and DIoU.
   - Tracker scenarios: straight-line motion → 1 ID; 0.5 s occlusion → same ID; two crossing objects keep their IDs; label flicker → still 1 track; noise tracks don't use up numbers; `hand #1/#2` and `face #1` are numbered separately.
-  - TargetSelector on synthetic frames: lit → target, dim → none, hysteresis, brightest only, rise guard.
+  - TargetSelector on synthetic frames:
+    - A face that brightens → target. A face that's dim, or bright all along with no change → none.
+    - Hysteresis and brightest-only.
+    - A bright non-face box (a phone) → never a target.
+    - The whole frame brightening (room light on) → no target.
+    - A new face with under 1 s of history → no target.
   - LabelLibrary save/load round trip and the lead rule; ClassRegistry; CLI parsing.
 - **Regression clips** (run with `--video ... --stats`, compared to the M0 baseline):
   - `hands_face.mov`: total confirmed IDs down ≥ 75% from the M0 baseline on the same clip, at most 2 IDs per hand that's in view, and face and hand counted as separate types. For reference, an earlier live run gave 2 hands 18 IDs.
-  - `flashlight.mov`: TARGET appears within 0.2 s of light-on and clears within 0.5 s of light-off.
+  - `flashlight.mov`: TARGET appears within 0.2 s of light-on and clears within 0.5 s of light-off. The `cell phone` track (the light source) and the chair are never targeted.
 - **Live checks:**
   - ≥ 25 FPS with all detectors on, **and still ≥ 25 FPS with custom labels enrolled** (recognition shares the GPU). The HUD shows the backend as CoreML.
   - Turning room lights on and off produces no TARGET.
