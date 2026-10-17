@@ -47,7 +47,7 @@ void drawTracks(cv::Mat& frame, const std::vector<Track>& tracks,
         const std::string name = (t.classId >= 0 && t.classId < static_cast<int>(classNames.size()))
                                      ? classNames[t.classId]
                                      : "obj";
-        std::snprintf(label, sizeof(label), "%s #%d %.2f", name.c_str(), t.id, t.conf);
+        std::snprintf(label, sizeof(label), "%s #%d %.2f", name.c_str(), t.number, t.conf);
         drawLabel(frame, label, {static_cast<int>(t.box.x), static_cast<int>(t.box.y)}, color);
     }
 }

@@ -1,5 +1,6 @@
 #pragma once
 #include <deque>
+#include <map>
 #include <opencv2/core.hpp>
 #include <opencv2/video/tracking.hpp>
 #include <vector>
@@ -7,7 +8,7 @@
 #include "Detector.h"
 
 struct Track {
-    int id;
+    int id;  // unique for the whole run, across all classes (used in logs)
     int classId;
     float conf;
     cv::Rect2f box;
@@ -15,6 +16,7 @@ struct Track {
     int hits = 1;         // frames matched to a detection
     int misses = 0;       // consecutive frames without a match
     bool confirmed = false;
+    int number = 0;       // per-class number shown on screen ("hand #2"); 0 until confirmed
     std::deque<cv::Point2f> trail;  // recent centers, newest at back
 };
 
@@ -35,8 +37,10 @@ public:
 
 private:
     Track createTrack(const Detection& det);
+    void confirm(Track& t);
 
     TrackerParams params_;
     std::vector<Track> tracks_;
     int nextId_ = 1;
+    std::map<int, int> lastNumber_;  // classId -> last number handed out (never reused)
 };

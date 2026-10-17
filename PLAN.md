@@ -88,7 +88,7 @@ Each milestone builds, runs and gets its own git commit.
   - While lost, velocity decays with a 0.15 s half-life so the box stops drifting away. It's based on time, not frames, so it behaves the same at any FPS.
   - Timeouts are in **seconds** (lost after 0.7 s), not frames, so behavior doesn't change with FPS.
   - The Kalman filter steps by the real time between frames, using capture timestamps. Width and height velocities are clamped.
-- **Numbers per type:** each type has its own counter (`hand #1`, `hand #2`, `face #1`, `cup #1`).
+- **Numbers per type** (basic version done early, 2026-10-17: per-class counters assigned on confirmation, never reused; M3 extends it to class changes and custom-label types): each type has its own counter (`hand #1`, `hand #2`, `face #1`, `cup #1`).
   - A number is assigned **when a track is confirmed**, so 1–3-frame noise tracks don't use up numbers.
   - Numbers are never reused within a run.
   - If a track's voted class changes for good (e.g. it settles on `laptop` after starting as `tv`), it gets the next number in the new type. The old number is not handed out again.

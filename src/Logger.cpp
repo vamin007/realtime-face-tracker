@@ -17,7 +17,7 @@ Logger::Logger(const std::string& logDir) {
 
     out_.open(path_);
     if (!out_) throw std::runtime_error("Failed to open log file: " + path_);
-    out_ << "timestamp_ms,frame,id,class,x,y,w,h,conf\n";
+    out_ << "timestamp_ms,frame,id,number,class,x,y,w,h,conf\n";
 }
 
 void Logger::log(long long frameIndex, const std::vector<Track>& tracks,
@@ -27,7 +27,8 @@ void Logger::log(long long frameIndex, const std::vector<Track>& tracks,
                         .count();
     for (const Track& t : tracks) {
         if (!isVisible(t)) continue;
-        out_ << ms << ',' << frameIndex << ',' << t.id << ',' << classNames[t.classId] << ','
+        out_ << ms << ',' << frameIndex << ',' << t.id << ',' << t.number << ','
+             << classNames[t.classId] << ','
              << static_cast<int>(t.box.x) << ',' << static_cast<int>(t.box.y) << ','
              << static_cast<int>(t.box.width) << ',' << static_cast<int>(t.box.height) << ','
              << t.conf << '\n';

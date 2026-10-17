@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <map>
 #include <set>
 
 #include "Overlay.h"  // isVisible
@@ -84,6 +85,39 @@ TEST(Tracker, TwoSeparateObjectsKeepTheirIds) {
         for (int id : visibleIds(tracker)) seen.insert(id);
     }
     EXPECT_EQ(seen.size(), 2u);
+}
+
+TEST(TrackerNumbers, EachClassCountsFromOne) {
+    constexpr int kPerson = 0, kHand = 80, kFace = 81;
+    Tracker tracker;
+    for (int f = 0; f < 5; ++f)
+        tracker.update({det(100, 100, kHand), det(400, 100, kHand), det(250, 300, kFace),
+                        det(600, 400, kPerson)});
+    std::map<int, std::set<int>> numbers;  // classId -> numbers on screen
+    for (const Track& t : tracker.tracks())
+        if (isVisible(t)) numbers[t.classId].insert(t.number);
+    EXPECT_EQ(numbers[kHand], (std::set<int>{1, 2}));
+    EXPECT_EQ(numbers[kFace], (std::set<int>{1}));
+    EXPECT_EQ(numbers[kPerson], (std::set<int>{1}));
+}
+
+TEST(TrackerNumbers, BriefFalseDetectionsDontUseNumbers) {
+    Tracker tracker;
+    // One-frame blips in different places: never confirmed, never shown.
+    for (int f = 0; f < 10; ++f) tracker.update({det(50 + 90.0f * f, 50)});
+    for (int f = 0; f < 5; ++f) tracker.update({det(300, 300)});
+    ASSERT_EQ(visibleIds(tracker).size(), 1u);
+    EXPECT_EQ(tracker.tracks().front().number, 1);
+}
+
+TEST(TrackerNumbers, NumbersAreNotReused) {
+    TrackerParams params;
+    Tracker tracker(params);
+    for (int f = 0; f < 5; ++f) tracker.update({det(100, 100)});
+    for (int f = 0; f <= params.maxMisses; ++f) tracker.update({});  // first object is gone
+    for (int f = 0; f < 5; ++f) tracker.update({det(100, 100)});
+    ASSERT_EQ(tracker.tracks().size(), 1u);
+    EXPECT_EQ(tracker.tracks().front().number, 2);
 }
 
 // Known weaknesses of the current tracker, fixed in M3 (see PLAN.md).

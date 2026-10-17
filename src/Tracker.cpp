@@ -52,9 +52,16 @@ Track Tracker::createTrack(const Detection& det) {
     t.kf.statePost = cv::Mat::zeros(kState, 1, CV_32F);
     toMeasurement(det.box).copyTo(t.kf.statePost.rowRange(0, kMeas));
 
-    t.confirmed = params_.minHits <= 1;
+    if (params_.minHits <= 1) confirm(t);
     t.trail.push_back(center(det.box));
     return t;
+}
+
+// Numbers are handed out only on confirmation, so brief false detections that
+// never get shown don't use them up.
+void Tracker::confirm(Track& t) {
+    t.confirmed = true;
+    t.number = ++lastNumber_[t.classId];
 }
 
 void Tracker::update(const std::vector<Detection>& detections) {
@@ -82,7 +89,7 @@ void Tracker::update(const std::vector<Detection>& detections) {
         t.box = toRect(t.kf.correct(toMeasurement(detections[di].box)));
         t.conf = detections[di].conf;
         t.misses = 0;
-        if (++t.hits >= params_.minHits) t.confirmed = true;
+        if (++t.hits >= params_.minHits && !t.confirmed) confirm(t);
         t.trail.push_back(center(t.box));
         if (t.trail.size() > params_.trailLength) t.trail.pop_front();
     }
