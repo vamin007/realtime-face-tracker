@@ -4,11 +4,12 @@
 #include <vector>
 
 #include "ClassRegistry.h"
+#include "Detector.h"
 #include "Tracker.h"
 
 struct HudInfo {
     double fps;
-    double inferenceMs;
+    std::vector<Detector::Timing> timings;  // per detector, this frame
     int visibleTracks;
 };
 

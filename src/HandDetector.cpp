@@ -1,6 +1,7 @@
 #include "HandDetector.h"
 
 #include <cmath>
+#include <opencv2/dnn.hpp>
 #include <opencv2/imgproc.hpp>
 #include <stdexcept>
 
@@ -49,12 +50,18 @@ cv::Rect2f handBoxFromPalm(const cv::Rect2f& palm, const std::vector<cv::Point2f
 }
 
 HandDetector::HandDetector(const std::string& modelPath, ClassId handClass,
-                           DetectorThresholds thresholds)
-    : handClass_(handClass), th_(thresholds), anchors_(palmAnchors()) {
-    requireModelFile(modelPath);
-    net_ = cv::dnn::readNet(modelPath);
-    if (net_.empty()) throw std::runtime_error("Failed to load hand model: " + modelPath);
+                           DetectorThresholds thresholds, Backend backend,
+                           const std::string& cacheDir)
+    : model_(std::make_unique<OrtModel>(modelPath, backend, cacheDir)),
+      handClass_(handClass),
+      th_(thresholds),
+      anchors_(palmAnchors()) {
+    const std::vector<int64_t> shape = model_->inputShape();  // [1, 192, 192, 3]
+    if (shape.size() != 4 || shape[1] != kInputSize || shape[2] != kInputSize)
+        throw std::runtime_error("Unexpected input shape for the palm model: " + modelPath);
 }
+
+std::string HandDetector::info() const { return model_->backendInfo(); }
 
 std::vector<Detection> HandDetector::detect(const cv::Mat& frame) {
     // Letterbox to 192x192, centered, padded with black.
@@ -75,15 +82,20 @@ std::vector<Detection> HandDetector::detect(const cv::Mat& frame) {
     cv::cvtColor(padded, rgb, cv::COLOR_BGR2RGB);
     rgb.convertTo(floatImg, CV_32F, 1.0 / 255.0);
     const int shape[] = {1, kInputSize, kInputSize, 3};
-    net_.setInput(cv::Mat(4, shape, CV_32F, floatImg.data));
-    std::vector<cv::Mat> outputs;
-    net_.forward(outputs, net_.getUnconnectedOutLayersNames());
+    const std::vector<cv::Mat> outputs = model_->run(cv::Mat(4, shape, CV_32F, floatImg.data));
     if (outputs.size() < 2) return {};
 
-    // outputs[0]: per anchor 18 values (box cx, cy, w, h, then 7 keypoint x, y),
-    // as offsets in input pixels from the anchor. outputs[1]: per anchor a score logit.
-    const cv::Mat raw = outputs[0].reshape(1, static_cast<int>(outputs[0].total() / 18));
-    const cv::Mat logits = outputs[1].reshape(1, static_cast<int>(outputs[1].total()));
+    // One output has 18 values per anchor (box cx, cy, w, h, then 7 keypoint x, y,
+    // as offsets in input pixels from the anchor); the other a score logit per anchor.
+    const int numAnchors = static_cast<int>(anchors_.size());
+    const bool boxesFirst = outputs[0].total() == static_cast<size_t>(numAnchors) * 18;
+    const cv::Mat& boxOut = boxesFirst ? outputs[0] : outputs[1];
+    const cv::Mat& scoreOut = boxesFirst ? outputs[1] : outputs[0];
+    if (boxOut.total() != static_cast<size_t>(numAnchors) * 18 ||
+        scoreOut.total() != static_cast<size_t>(numAnchors))
+        throw std::runtime_error("Unexpected palm model outputs");
+    const cv::Mat raw = boxOut.reshape(1, numAnchors);
+    const cv::Mat logits = scoreOut.reshape(1, numAnchors);
     const float scale = static_cast<float>(std::max(frame.cols, frame.rows));
     const cv::Point2f padBias(padX / ratio, padY / ratio);
     auto toFrame = [&](float dx, float dy, const cv::Point2f& anchor) {
@@ -95,8 +107,7 @@ std::vector<Detection> HandDetector::detect(const cv::Mat& frame) {
     std::vector<cv::Rect2d> palms;
     std::vector<float> scores;
     std::vector<int> rows;
-    const int n = std::min(logits.rows, static_cast<int>(anchors_.size()));
-    for (int i = 0; i < n; ++i) {
+    for (int i = 0; i < numAnchors; ++i) {
         const float score = 1.0f / (1.0f + std::exp(-logits.at<float>(i, 0)));
         if (score < th_.low) continue;
         const float* b = raw.ptr<float>(i);

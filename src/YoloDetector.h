@@ -1,20 +1,23 @@
 #pragma once
-#include <opencv2/dnn.hpp>
+#include <memory>
 #include <string>
 
 #include "IDetector.h"
+#include "OrtModel.h"
 
 // YOLOv8 (ONNX) for the 80 COCO classes; class ids are YOLO's output indices.
+// The input size comes from the model (e.g. 640x640, or 640x384 for 16:9 video).
 class YoloDetector : public IDetector {
 public:
     YoloDetector(const std::string& modelPath, int numClasses, DetectorThresholds thresholds,
-                 cv::Size inputSize = {640, 640});
+                 Backend backend, const std::string& cacheDir);
     const char* name() const override { return "yolo"; }
     bool canDetect(ClassId id) const override { return id >= 0 && id < numClasses_; }
     std::vector<Detection> detect(const cv::Mat& frame) override;
+    std::string info() const override;
 
 private:
-    cv::dnn::Net net_;
+    std::unique_ptr<OrtModel> model_;
     int numClasses_;
     DetectorThresholds th_;
     cv::Size inputSize_;

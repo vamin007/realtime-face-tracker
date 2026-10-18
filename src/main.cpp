@@ -3,8 +3,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <opencv2/core.hpp>
+#include <opencv2/core/utils/logger.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <set>
@@ -37,12 +39,16 @@ struct Options {
     float confFace = 0.6f;
     float confHand = 0.6f;
     int camera = 0;
-    std::string video;  // play a file instead of the camera
-    ModelPath yoloModel{kModels + "yolov8n.onnx"};
+    std::string video;      // play a file instead of the camera
+    bool realtime = false;  // play the video at its own speed, skipping frames when busy
+    Backend backend = Backend::CoreML;
+    // 640x384 fits a 16:9 frame with little padding; the square model is the fallback.
+    ModelPath yoloModel{kModels + "yolov8n_384x640.onnx"};
     ModelPath faceModel{kModels + "face_detection_yunet_2023mar.onnx"};
     ModelPath handModel{kModels + "palm_detection_mediapipe_2023feb.onnx"};
     std::string names = kModels + "coco.names";
     std::string logDir = std::string(PROJECT_DIR) + "/logs";
+    std::string cacheDir = std::string(PROJECT_DIR) + "/.cache/coreml";
     bool log = true;
     bool mirror = true;
     bool faces = true;
@@ -55,6 +61,8 @@ struct Options {
     std::string dumpDetections;  // CSV of every raw detection per frame
     std::string saveFrames;      // directory for annotated snapshots
     int saveEvery = 30;
+    bool parallel = true;  // run the detectors side by side
+    int faceWidth = 640;   // face detection works on frames scaled down to this width
 };
 
 void printUsage() {
@@ -70,11 +78,13 @@ void printUsage() {
            "  --no-hands          turn off hand detection\n"
            "  --camera N          camera index (default 0)\n"
            "  --video PATH        read a video file instead of the camera\n"
+           "  --realtime          play the video at its own speed, like a camera\n"
            "  --no-window         don't show a window (video files only)\n"
            "  --no-mirror         don't flip the camera image horizontally\n"
            "  --show-trail        draw a motion trail behind each track\n"
            "  --no-log            don't write a CSV log\n"
-           "  --model PATH        YOLO model (default models/yolov8n.onnx)\n"
+           "  --backend B         coreml (GPU / Neural Engine, default) or cpu\n"
+           "  --model PATH        YOLO model (default models/yolov8n_384x640.onnx)\n"
            "  --face-model PATH   face model (default models/face_detection_yunet_2023mar.onnx)\n"
            "  --hand-model PATH   hand model (default "
            "models/palm_detection_mediapipe_2023feb.onnx)\n"
@@ -83,6 +93,8 @@ void printUsage() {
            "  --dump-detections PATH    write every raw detection to a CSV\n"
            "  --save-frames DIR         save annotated frames as JPEGs\n"
            "  --save-every N            with --save-frames: every Nth frame (default 30)\n"
+           "  --sequential              run the detectors one after another\n"
+           "  --face-width N            width faces are detected at (default 640, 0 = full)\n"
            "Keys: Esc or q to quit.\n";
 }
 
@@ -144,7 +156,13 @@ bool parseArgs(int argc, char** argv, Options& opt) {
         else if (arg == "--no-hands") opt.hands = false;
         else if (arg == "--camera") opt.camera = static_cast<int>(parseInt(arg, next(), 0, 99));
         else if (arg == "--video") opt.video = next();
-        else if (arg == "--no-window") opt.window = false;
+        else if (arg == "--realtime") opt.realtime = true;
+        else if (arg == "--backend") {
+            const std::string b = next();
+            if (b == "coreml") opt.backend = Backend::CoreML;
+            else if (b == "cpu") opt.backend = Backend::Cpu;
+            else throw std::runtime_error("--backend expects coreml or cpu, got '" + b + "'");
+        } else if (arg == "--no-window") opt.window = false;
         else if (arg == "--no-mirror") opt.mirror = false;
         else if (arg == "--show-trail") opt.showTrail = true;
         else if (arg == "--no-log") opt.log = false;
@@ -156,6 +174,9 @@ bool parseArgs(int argc, char** argv, Options& opt) {
         else if (arg == "--save-frames") opt.saveFrames = next();
         else if (arg == "--save-every")
             opt.saveEvery = static_cast<int>(parseInt(arg, next(), 1, 100000));
+        else if (arg == "--sequential") opt.parallel = false;
+        else if (arg == "--face-width")
+            opt.faceWidth = static_cast<int>(parseInt(arg, next(), 0, 10000));
         else if (arg == "--help" || arg == "-h") {
             printUsage();
             return false;
@@ -209,6 +230,8 @@ void dumpDetections(std::ofstream& out, long long frame, double tMs,
 }  // namespace
 
 int main(int argc, char** argv) try {
+    // OpenCV's DNN module prints a warning about compute targets on every launch.
+    cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_ERROR);
     Options opt;
     if (!parseArgs(argc, argv, opt)) return 0;
 
@@ -219,33 +242,45 @@ int main(int argc, char** argv) try {
     }
     const std::set<ClassId> allowed = resolveClasses(opt.classes, classes);
 
+    // Fall back to the square YOLO model if the 16:9 one hasn't been exported.
+    if (!opt.yoloModel.explicitlySet && !std::filesystem::exists(opt.yoloModel.path))
+        opt.yoloModel.path = kModels + "yolov8n.onnx";
+
     Detector detector;
+    detector.setParallel(opt.parallel);
     addDetector(detector, opt.yoloModel, [&] {
         return std::make_unique<YoloDetector>(opt.yoloModel.path, classes.cocoCount(),
-                                              DetectorThresholds{opt.confYolo});
+                                              DetectorThresholds{opt.confYolo}, opt.backend,
+                                              opt.cacheDir);
     });
     if (opt.faces)
         addDetector(detector, opt.faceModel, [&] {
             return std::make_unique<FaceDetector>(opt.faceModel.path, classes.face(),
-                                                  DetectorThresholds{opt.confFace, 0.1f, 0.3f});
+                                                  DetectorThresholds{opt.confFace, 0.1f, 0.3f},
+                                                  opt.faceWidth);
         });
     if (opt.hands)
         addDetector(detector, opt.handModel, [&] {
             return std::make_unique<HandDetector>(opt.handModel.path, classes.hand(),
-                                                  DetectorThresholds{opt.confHand, 0.1f, 0.3f});
+                                                  DetectorThresholds{opt.confHand, 0.1f, 0.3f},
+                                                  opt.backend, opt.cacheDir);
         });
     if (detector.empty()) throw std::runtime_error("No detector could be loaded");
+    std::cout << "Detectors (" << (opt.parallel ? "side by side" : "one after another") << "):\n";
+    for (const std::string& line : detector.summary()) std::cout << "  " << line << '\n';
 
     Camera camera;
-    const bool opened =
-        opt.video.empty() ? camera.openDevice(opt.camera, 1280, 720) : camera.openFile(opt.video);
+    const bool opened = opt.video.empty() ? camera.openDevice(opt.camera, 1280, 720)
+                                          : camera.openFile(opt.video, opt.realtime);
     if (!opened) {
         std::cerr << "Could not open " << (opt.video.empty() ? "camera" : opt.video) << ".\n"
                   << "If this is the camera, allow access for your terminal app in\n"
                   << "System Settings > Privacy & Security > Camera, then try again.\n";
         return 1;
     }
-    const double videoFps = camera.fps();
+    std::printf("%s: %dx%d at %.0f FPS%s\n", camera.isLive() ? "Camera" : "Video",
+                camera.frameSize().width, camera.frameSize().height, camera.fps(),
+                opt.realtime ? " (realtime)" : "");
 
     std::unique_ptr<Logger> logger;
     if (opt.log) {
@@ -270,19 +305,18 @@ int main(int argc, char** argv) try {
     double fps = 0.0;
     long long frameIndex = 0;
     cv::Mat frame;
+    double tMs = 0;
+    // Running totals for the summary at the end.
+    double detectMsTotal = 0;
+    std::map<std::string, double> detectorMsTotal;
 
-    while ((opt.maxFrames == 0 || frameIndex < opt.maxFrames) && camera.read(frame)) {
+    while ((opt.maxFrames == 0 || frameIndex < opt.maxFrames) && camera.read(frame, tMs)) {
         if (opt.mirror && camera.isLive()) cv::flip(frame, frame, 1);
-        // Frame time: wall clock for the camera, the frame's position for a video.
-        const double tMs =
-            camera.isLive()
-                ? std::chrono::duration<double, std::milli>(Clock::now() - start).count()
-                : frameIndex * 1000.0 / videoFps;
 
         const auto t0 = Clock::now();
         const auto detections = detector.detect(frame, allowed);
-        const double inferenceMs =
-            std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+        detectMsTotal += std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+        for (const auto& t : detector.timings()) detectorMsTotal[t.name] += t.ms;
         if (dump.is_open()) dumpDetections(dump, frameIndex, tMs, detections, classes);
 
         tracker.update(detections);
@@ -298,7 +332,7 @@ int main(int argc, char** argv) try {
         for (const Track& t : tracker.tracks()) visible += isVisible(t);
 
         drawTracks(frame, tracker.tracks(), classes, opt.showTrail);
-        drawHud(frame, {fps, inferenceMs, visible});
+        drawHud(frame, {fps, detector.timings(), visible});
         if (!opt.saveFrames.empty() && frameIndex % opt.saveEvery == 0) {
             char name[32];
             std::snprintf(name, sizeof(name), "/frame_%06lld.jpg", frameIndex);
@@ -316,6 +350,17 @@ int main(int argc, char** argv) try {
     const double seconds = std::chrono::duration<double>(Clock::now() - start).count();
     std::printf("Processed %lld frames in %.1f s (%.1f FPS)\n", frameIndex, seconds,
                 seconds > 0 ? frameIndex / seconds : 0.0);
+    if (frameIndex > 0) {
+        std::printf("Detection per frame: %.1f ms (", detectMsTotal / frameIndex);
+        const char* sep = "";
+        for (const auto& [name, ms] : detectorMsTotal) {
+            std::printf("%s%s %.1f", sep, name.c_str(), ms / frameIndex);
+            sep = ", ";
+        }
+        std::printf(")\n");
+    }
+    if (camera.dropped() > 0)
+        std::printf("Skipped %lld frames that arrived while busy\n", camera.dropped());
     return 0;
 } catch (const std::exception& e) {
     std::cerr << "Error: " << e.what() << '\n';

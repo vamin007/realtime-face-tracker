@@ -20,6 +20,8 @@ public:
     // Finds objects in a BGR frame. Returns everything at or above the low
     // threshold; detections below the main threshold are marked weak.
     virtual std::vector<Detection> detect(const cv::Mat& frame) = 0;
+    // What it runs on, for the startup summary (e.g. "640x384, CoreML").
+    virtual std::string info() const { return ""; }
 };
 
 // Throws a readable error if a model file is missing.

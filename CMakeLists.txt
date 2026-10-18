@@ -11,12 +11,14 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 find_package(OpenCV REQUIRED)
+find_package(onnxruntime REQUIRED)  # brew install onnxruntime
 
 # Everything except main(), so the tests link the same code the app runs.
 add_library(tracker_core STATIC
     src/Camera.cpp
     src/ClassRegistry.cpp
     src/Detector.cpp
+    src/OrtModel.cpp
     src/YoloDetector.cpp
     src/FaceDetector.cpp
     src/HandDetector.cpp
@@ -25,7 +27,7 @@ add_library(tracker_core STATIC
     src/Logger.cpp
 )
 target_include_directories(tracker_core PUBLIC src)
-target_link_libraries(tracker_core PUBLIC ${OpenCV_LIBS})
+target_link_libraries(tracker_core PUBLIC ${OpenCV_LIBS} onnxruntime::onnxruntime)
 
 add_executable(tracker src/main.cpp)
 target_link_libraries(tracker PRIVATE tracker_core)
@@ -40,6 +42,7 @@ if(GTest_FOUND)
     add_executable(tracker_tests
         tests/ClassRegistryTest.cpp
         tests/DetectorTest.cpp
+        tests/OrtModelTest.cpp
         tests/TrackerTest.cpp
     )
     target_link_libraries(tracker_tests PRIVATE tracker_core GTest::gtest_main)

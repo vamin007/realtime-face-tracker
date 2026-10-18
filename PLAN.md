@@ -64,6 +64,14 @@ Each milestone builds, runs and gets its own git commit.
 - Model load failure is a hard error if the model was asked for with a flag. A default model that fails to load prints a warning and is disabled.
 
 ### M2: Frame rate (target ≥25 FPS live; the camera's maximum is 30)
+**Done 2026-10-17.** Realtime playback of `hands_face.mov` holds 30.0 FPS with no skipped frames; processing speed went from 18.4 to 74.8 FPS (detection about 13 ms per frame). As built:
+- YOLO 640×384 runs fully on CoreML (MLProgram, 233/233 nodes): 44 ms on the CPU → 11 ms.
+- The palm model runs on the CPU. CoreML could only take 91 of its 124 nodes, and that split ran slower (14.6 ms) than CPU alone (12.5 ms). The wrapper (`OrtModel`) now uses CoreML only when it takes a whole model.
+- Faces run on OpenCV at 640 px wide (7 ms).
+- Detectors side by side: 29 ms → 13 ms per frame.
+- `--detect-every N` was not needed (detection uses well under half the frame budget), so it was left out. `--stats` and `--benchmark` became an end-of-run summary printed by every run, plus `--realtime` and `--sequential`.
+
+Original plan:
 - **Concept: CoreML execution provider.** ONNX Runtime can hand a model to Apple's CoreML, which runs it on the M1 Pro's GPU or Neural Engine instead of the CPU.
 - `brew install onnxruntime` (the formula builds with CoreML on macOS; header `onnxruntime/coreml_provider_factory.h`). An `OrtSession` wrapper tries CoreML first and falls back to CPU, and prints the backend it picked. CoreML's compiled model is cached so restarts are fast. Flag: `--backend coreml|cpu`.
 - YOLO and the palm model move to ONNX Runtime. YuNet stays on OpenCV's `FaceDetectorYN` but runs on a 640×360 downscale, and boxes are scaled back up.

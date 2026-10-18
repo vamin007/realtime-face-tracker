@@ -1,6 +1,7 @@
 #include "YoloDetector.h"
 
 #include <algorithm>
+#include <opencv2/dnn.hpp>
 #include <opencv2/imgproc.hpp>
 #include <stdexcept>
 
@@ -13,11 +14,20 @@ constexpr float kCrossClassIou = 0.7f;
 }  // namespace
 
 YoloDetector::YoloDetector(const std::string& modelPath, int numClasses,
-                           DetectorThresholds thresholds, cv::Size inputSize)
-    : numClasses_(numClasses), th_(thresholds), inputSize_(inputSize) {
-    requireModelFile(modelPath);
-    net_ = cv::dnn::readNetFromONNX(modelPath);
-    if (net_.empty()) throw std::runtime_error("Failed to load YOLO model: " + modelPath);
+                           DetectorThresholds thresholds, Backend backend,
+                           const std::string& cacheDir)
+    : model_(std::make_unique<OrtModel>(modelPath, backend, cacheDir)),
+      numClasses_(numClasses),
+      th_(thresholds) {
+    const std::vector<int64_t> shape = model_->inputShape();  // [1, 3, height, width]
+    if (shape.size() != 4 || shape[2] <= 0 || shape[3] <= 0)
+        throw std::runtime_error("YOLO model needs a fixed [1, 3, H, W] input: " + modelPath);
+    inputSize_ = cv::Size(static_cast<int>(shape[3]), static_cast<int>(shape[2]));
+}
+
+std::string YoloDetector::info() const {
+    return std::to_string(inputSize_.width) + "x" + std::to_string(inputSize_.height) + ", " +
+           model_->backendInfo();
 }
 
 std::vector<Detection> YoloDetector::detect(const cv::Mat& frame) {
@@ -29,10 +39,10 @@ std::vector<Detection> YoloDetector::detect(const cv::Mat& frame) {
     cv::Mat input(inputSize_, CV_8UC3, cv::Scalar(114, 114, 114));
     resized.copyTo(input(cv::Rect(0, 0, resized.cols, resized.rows)));
 
-    net_.setInput(
-        cv::dnn::blobFromImage(input, 1.0 / 255.0, inputSize_, cv::Scalar(), true, false));
-    const cv::Mat out = net_.forward();
-    if (out.size[1] - 4 != numClasses_)
+    const cv::Mat blob =
+        cv::dnn::blobFromImage(input, 1.0 / 255.0, inputSize_, cv::Scalar(), true, false);
+    const cv::Mat out = model_->run(blob).at(0);
+    if (out.dims != 3 || out.size[1] - 4 != numClasses_)
         throw std::runtime_error("YOLO model has " + std::to_string(out.size[1] - 4) +
                                  " classes but coco.names lists " + std::to_string(numClasses_));
     return decodeYolo(out, scale, frame.size(), th_);

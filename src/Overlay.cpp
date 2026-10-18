@@ -19,8 +19,8 @@ void drawLabel(cv::Mat& frame, const std::string& text, cv::Point origin, const 
     int baseline = 0;
     const cv::Size size = cv::getTextSize(text, cv::FONT_HERSHEY_SIMPLEX, 0.6, 2, &baseline);
     origin.y = std::max(origin.y, size.height + 4);
-    cv::rectangle(frame, {origin.x, origin.y - size.height - 4}, {origin.x + size.width + 4, origin.y + 2},
-                  bg, cv::FILLED);
+    cv::rectangle(frame, {origin.x, origin.y - size.height - 4},
+                  {origin.x + size.width + 4, origin.y + 2}, bg, cv::FILLED);
     cv::putText(frame, text, {origin.x + 2, origin.y - 2}, cv::FONT_HERSHEY_SIMPLEX, 0.6,
                 cv::Scalar(0, 0, 0), 2, cv::LINE_AA);
 }
@@ -50,8 +50,14 @@ void drawTracks(cv::Mat& frame, const std::vector<Track>& tracks, const ClassReg
 }
 
 void drawHud(cv::Mat& frame, const HudInfo& info) {
-    char text[96];
-    std::snprintf(text, sizeof(text), "FPS %.1f | detect %.0f ms | tracks %d", info.fps,
-                  info.inferenceMs, info.visibleTracks);
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "FPS %.1f |", info.fps);
+    std::string text = buf;
+    for (const auto& t : info.timings) {
+        std::snprintf(buf, sizeof(buf), " %s %.0f", t.name.c_str(), t.ms);
+        text += buf;
+    }
+    std::snprintf(buf, sizeof(buf), " ms | tracks %d", info.visibleTracks);
+    text += buf;
     drawLabel(frame, text, {8, 28}, cv::Scalar(255, 255, 255));
 }

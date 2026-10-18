@@ -1,20 +1,23 @@
 #pragma once
-#include <opencv2/dnn.hpp>
+#include <memory>
 #include <string>
 
 #include "IDetector.h"
+#include "OrtModel.h"
 
 // Hand detection with MediaPipe's palm detector. The model finds palms; each
 // palm box is extended toward the fingers to cover the whole hand.
 class HandDetector : public IDetector {
 public:
-    HandDetector(const std::string& modelPath, ClassId handClass, DetectorThresholds thresholds);
+    HandDetector(const std::string& modelPath, ClassId handClass, DetectorThresholds thresholds,
+                 Backend backend, const std::string& cacheDir);
     const char* name() const override { return "hand"; }
     bool canDetect(ClassId id) const override { return id == handClass_; }
     std::vector<Detection> detect(const cv::Mat& frame) override;
+    std::string info() const override;
 
 private:
-    cv::dnn::Net net_;
+    std::unique_ptr<OrtModel> model_;
     ClassId handClass_;
     DetectorThresholds th_;
     std::vector<cv::Point2f> anchors_;
