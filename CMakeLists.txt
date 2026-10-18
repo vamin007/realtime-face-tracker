@@ -25,6 +25,7 @@ add_library(tracker_core STATIC
     src/Assignment.cpp
     src/KalmanBox.cpp
     src/Tracker.cpp
+    src/Targeting.cpp
     src/Overlay.cpp
     src/Logger.cpp
 )
@@ -52,6 +53,7 @@ if(GTest_FOUND)
         tests/DetectorTest.cpp
         tests/KalmanBoxTest.cpp
         tests/OrtModelTest.cpp
+        tests/TargetingTest.cpp
         tests/TrackerTest.cpp
     )
     target_link_libraries(tracker_tests PRIVATE tracker_core GTest::gtest_main)

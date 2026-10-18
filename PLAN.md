@@ -144,6 +144,13 @@ struct Track {
 ```
 
 ### M4: Bright-light face targeting
+**Done 2026-10-17.** On `flashlight.mov`, all 10 times the light hit the face became TARGET episodes. Each turned on within 0.2 s and released about 0.25 s after the light went off. The phone (the light source) and the chair were never targeted. On `hands_face.mov` there were no targets. Measured and changed from the plan:
+- In a bright room an unlit face measured 0.72–0.78 of the room's brightness, and a lit one 1.2–1.8. A rise of 1.5–2.6× over normal is the reliable signal. Thresholds: rise ≥ 1.35 and face at least as bright as the room (ratio ≥ 1.0); the planned ratio ≥ 1.6 missed half the episodes.
+- After the light goes off, the face dips to about 0.5 for a second while the camera's exposure recovers. The normal level now adapts quickly only within ±15% of normal, and very slowly (20 s) otherwise, so lit periods and dips don't drag it along.
+- A hand held in front of the face (a palm lit by the window) looked like a light: rise 1.55. Faces covered more than 25% by a tracked hand, or not detected that frame, aren't measured.
+- Track colors skip red, so red only ever means TARGET.
+
+Original plan:
 **Rule (user, 2026-10-17): only a change in brightness on a face triggers TARGET.**
 - **Only faces can be targeted.** Brightness is measured only on face tracks (and custom labels whose base class is face). The phone shining the light, a lamp, a window or a screen is never targeted, even if it's the brightest thing in the frame. In `flashlight.mov` the phone is detected as `cell phone`, which is correct, and it must stay an ordinary track.
 - `TargetSelector` runs after the tracker and measures, for each confirmed face track:

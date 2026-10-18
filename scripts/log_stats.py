@@ -6,8 +6,10 @@ Usage: scripts/log_stats.py logs/run_*.csv
 Fewer IDs per class and longer lifetimes mean steadier tracking. Short tracks
 (5 frames or fewer) are mostly identity breaks or noise.
 
-Reads the original columns (timestamp_ms,frame,id,class,...) and the v2 columns
-(t_capture_ms,frame,uid,type,...).
+Reads the original columns (timestamp_ms,frame,id,class,...) and the newer ones
+(time_ms,frame,id,number,class,...). Original logs stamp each row with the wall
+clock, so their FPS is the processing speed; newer logs use each frame's own time
+(a video's position), so for a video the FPS is the video's frame rate.
 """
 import csv
 import statistics
@@ -32,8 +34,8 @@ def summarize(path):
         for row in csv.DictReader(f):
             frame = int(row["frame"])
             frames.add(frame)
-            times.append(int(first_column(row, "t_capture_ms", "timestamp_ms")))
-            key = (first_column(row, "type", "class"), first_column(row, "uid", "id"))
+            times.append(int(first_column(row, "time_ms", "timestamp_ms")))
+            key = (row["class"], row["id"])
             if key in span:
                 span[key][1] = frame
             else:

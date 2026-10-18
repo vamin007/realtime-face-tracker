@@ -9,6 +9,10 @@ Each run also writes a CSV log of every visible track.
   and center distance; confident detections first, then weak ones to keep existing tracks going (ByteTrack's
   idea). Tracks ride out short drop-outs and wait at the frame edge for objects that left. Each type is
   numbered on its own (`hand #1`, `hand #2`, `face #1`), and numbers are never reused within a run.
+- **TARGET:** when a bright light suddenly shines on a face, that face gets a red box labeled `TARGET`.
+  Brightness is judged relative to the room and to the face's own normal level, so a face that is always
+  bright, a room light switching on, a bright phone or a hand held up to the face don't count. Only faces
+  can be targets, and only the brightest lit one at a time (`--no-targeting` turns it off).
 
 The `v2` branch is being rebuilt following [PLAN.md](PLAN.md). `main` holds the original version.
 
@@ -62,7 +66,8 @@ To tune the tracker without re-running the neural networks, save a clip's detect
 ```
 src/        Camera (capture thread); ClassRegistry (all class ids); Detector runs the IDetector
             implementations (YoloDetector, FaceDetector, HandDetector) side by side; OrtModel
-            (ONNX Runtime + CoreML); Tracker (+ KalmanBox, Assignment); Overlay; Logger; main
+            (ONNX Runtime + CoreML); Tracker (+ KalmanBox, Assignment); Targeting (TARGET);
+            Overlay; Logger; main
 tools/      replay.cpp: the tracker on saved detections (tracker_replay)
 tests/      GoogleTest unit tests (tracker_tests)
 scripts/    fetch_models.sh, export_yolo.sh, log_stats.py

@@ -17,20 +17,28 @@ Logger::Logger(const std::string& logDir) {
 
     out_.open(path_);
     if (!out_) throw std::runtime_error("Failed to open log file: " + path_);
-    out_ << "timestamp_ms,frame,id,number,class,x,y,w,h,conf\n";
+    out_ << "time_ms,frame,id,number,class,matched,x,y,w,h,conf,target,light_ratio\n";
 }
 
-void Logger::log(long long frameIndex, const std::vector<Track>& tracks,
-                 const ClassRegistry& classes) {
-    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::system_clock::now().time_since_epoch())
-                        .count();
+void Logger::log(long long frameIndex, double timeMs, const std::vector<Track>& tracks,
+                 const ClassRegistry& classes, const TargetSelector* targeting) {
     for (const Track& t : tracks) {
         if (!isVisible(t)) continue;
-        out_ << ms << ',' << frameIndex << ',' << t.id << ',' << t.number << ','
-             << classes.name(t.classId) << ','
+        const bool isTarget = targeting && targeting->target().trackId == t.id;
+        out_ << static_cast<long long>(timeMs) << ',' << frameIndex << ',' << t.id << ','
+             << t.number << ',' << classes.name(t.classId) << ',' << (t.matched ? 1 : 0) << ','
              << static_cast<int>(t.box.x) << ',' << static_cast<int>(t.box.y) << ','
              << static_cast<int>(t.box.width) << ',' << static_cast<int>(t.box.height) << ','
-             << t.conf << '\n';
+             << t.conf << ',' << (isTarget ? 1 : 0) << ',';
+        if (targeting) {
+            const auto it = targeting->faces().find(t.id);
+            if (it != targeting->faces().end()) out_ << it->second.ratio;
+        }
+        out_ << '\n';
+    }
+    // Flush about once a second so a crash or Ctrl-C loses little.
+    if (timeMs - lastFlushMs_ >= 1000) {
+        out_.flush();
+        lastFlushMs_ = timeMs;
     }
 }

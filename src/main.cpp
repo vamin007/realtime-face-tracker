@@ -56,13 +56,16 @@ struct Options {
     bool showTrail = false;
     bool window = true;
     bool listClasses = false;
+    bool targeting = true;
+    TargetParams target;
     // Developer options
     long long maxFrames = 0;     // stop after this many frames; 0 = no limit
     std::string dumpDetections;  // CSV of every raw detection per frame
     std::string saveFrames;      // directory for annotated snapshots
     int saveEvery = 30;
-    bool parallel = true;  // run the detectors side by side
-    int faceWidth = 640;   // face detection works on frames scaled down to this width
+    std::string dumpLight;  // CSV of each face's brightness per frame
+    bool parallel = true;   // run the detectors side by side
+    int faceWidth = 640;    // face detection works on frames scaled down to this width
 };
 
 void printUsage() {
@@ -76,6 +79,9 @@ void printUsage() {
            "  --conf-hand N       hands (default 0.6)\n"
            "  --no-faces          turn off face detection\n"
            "  --no-hands          turn off hand detection\n"
+           "  --no-targeting      don't mark a brightly lit face as TARGET\n"
+           "  --target-ratio N    a lit face is N times as bright as the room (default 1.0)\n"
+           "  --target-rise N     ... and N times brighter than it normally is (default 1.35)\n"
            "  --camera N          camera index (default 0)\n"
            "  --video PATH        read a video file instead of the camera\n"
            "  --realtime          play the video at its own speed, like a camera\n"
@@ -95,6 +101,7 @@ void printUsage() {
            "  --save-every N            with --save-frames: every Nth frame (default 30)\n"
            "  --sequential              run the detectors one after another\n"
            "  --face-width N            width faces are detected at (default 640, 0 = full)\n"
+           "  --dump-light PATH         write each face's brightness per frame to a CSV\n"
            "Keys: Esc or q to quit.\n";
 }
 
@@ -154,6 +161,10 @@ bool parseArgs(int argc, char** argv, Options& opt) {
         else if (arg == "--conf-hand") opt.confHand = parseFloat(arg, next(), 0, 1);
         else if (arg == "--no-faces") opt.faces = false;
         else if (arg == "--no-hands") opt.hands = false;
+        else if (arg == "--no-targeting") opt.targeting = false;
+        else if (arg == "--target-ratio") opt.target.minRatio = parseFloat(arg, next(), 0.5f, 100);
+        else if (arg == "--target-rise") opt.target.minRise = parseFloat(arg, next(), 1, 100);
+        else if (arg == "--dump-light") opt.dumpLight = next();
         else if (arg == "--camera") opt.camera = static_cast<int>(parseInt(arg, next(), 0, 99));
         else if (arg == "--video") opt.video = next();
         else if (arg == "--realtime") opt.realtime = true;
@@ -227,6 +238,17 @@ void dumpDetections(std::ofstream& out, long long frame, double tMs,
     }
 }
 
+void dumpLight(std::ofstream& out, long long frame, double tMs, const TargetSelector& targeting) {
+    for (const auto& [id, f] : targeting.faces()) {
+        if (f.lastUpdate * 1000.0 < tMs - 1) continue;  // not measured this frame
+        char line[160];
+        std::snprintf(line, sizeof(line), "%lld,%.1f,%d,%.1f,%.1f,%.3f,%.3f,%.3f,%d,%d\n", frame,
+                      tMs, id, f.faceLuma, targeting.background(), f.ratio, f.normalRatio, f.rise(),
+                      f.litSince >= 0 ? 1 : 0, targeting.target().trackId == id ? 1 : 0);
+        out << line;
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) try {
@@ -297,6 +319,13 @@ int main(int argc, char** argv) try {
 
     Tracker tracker(classes);
     tracker.setFrameSize(camera.frameSize());
+    TargetSelector targeting(classes, opt.target);
+    std::ofstream lightDump;
+    if (!opt.dumpLight.empty()) {
+        lightDump.open(opt.dumpLight);
+        if (!lightDump) throw std::runtime_error("Failed to open " + opt.dumpLight);
+        lightDump << "frame,t_ms,id,face_luma,background,ratio,normal,rise,lit,target\n";
+    }
     const std::string window = "Object Tracker";
     if (opt.window) cv::namedWindow(window, cv::WINDOW_NORMAL);
 
@@ -321,7 +350,12 @@ int main(int argc, char** argv) try {
         if (dump.is_open()) dumpDetections(dump, frameIndex, tMs, detections, classes);
 
         tracker.update(detections, tMs / 1000.0);
-        if (logger) logger->log(frameIndex, tracker.tracks(), classes);
+        // Brightness is measured here, before anything is drawn on the frame.
+        if (opt.targeting) targeting.update(frame, tracker.tracks(), tMs / 1000.0);
+        if (lightDump.is_open()) dumpLight(lightDump, frameIndex, tMs, targeting);
+        if (logger)
+            logger->log(frameIndex, tMs, tracker.tracks(), classes,
+                        opt.targeting ? &targeting : nullptr);
 
         // Smoothed FPS so the number doesn't flicker.
         const auto now = Clock::now();
@@ -332,7 +366,8 @@ int main(int argc, char** argv) try {
         int visible = 0;
         for (const Track& t : tracker.tracks()) visible += isVisible(t);
 
-        drawTracks(frame, tracker.tracks(), classes, opt.showTrail);
+        drawTracks(frame, tracker.tracks(), classes, opt.showTrail, targeting.target().trackId);
+        drawTarget(frame, targeting.target());
         drawHud(frame, {fps, detector.timings(), visible});
         if (!opt.saveFrames.empty() && frameIndex % opt.saveEvery == 0) {
             char name[32];
