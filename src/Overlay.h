@@ -17,5 +17,5 @@ void drawTracks(cv::Mat& frame, const std::vector<Track>& tracks, const ClassReg
                 bool showTrail = false);
 void drawHud(cv::Mat& frame, const HudInfo& info);
 
-// A track is drawn/logged only once confirmed and while currently matched.
-inline bool isVisible(const Track& t) { return t.confirmed && t.misses == 0; }
+// A track is drawn and logged once confirmed, while seen recently (see TrackerParams::coastTime).
+inline bool isVisible(const Track& t) { return t.visible; }

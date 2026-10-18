@@ -22,6 +22,8 @@ add_library(tracker_core STATIC
     src/YoloDetector.cpp
     src/FaceDetector.cpp
     src/HandDetector.cpp
+    src/Assignment.cpp
+    src/KalmanBox.cpp
     src/Tracker.cpp
     src/Overlay.cpp
     src/Logger.cpp
@@ -35,13 +37,20 @@ target_link_libraries(tracker PRIVATE tracker_core)
 # Lets the program find models/ and logs/ no matter where it's run from.
 target_compile_definitions(tracker PRIVATE PROJECT_DIR="${CMAKE_SOURCE_DIR}")
 
+# Developer tool: re-runs the tracker on saved detections (see tools/replay.cpp).
+add_executable(tracker_replay tools/replay.cpp)
+target_link_libraries(tracker_replay PRIVATE tracker_core)
+target_compile_definitions(tracker_replay PRIVATE PROJECT_DIR="${CMAKE_SOURCE_DIR}")
+
 # Unit tests: build with the rest, run with `ctest --test-dir build`.
 find_package(GTest)
 if(GTest_FOUND)
     enable_testing()
     add_executable(tracker_tests
+        tests/AssignmentTest.cpp
         tests/ClassRegistryTest.cpp
         tests/DetectorTest.cpp
+        tests/KalmanBoxTest.cpp
         tests/OrtModelTest.cpp
         tests/TrackerTest.cpp
     )

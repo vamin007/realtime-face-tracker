@@ -82,6 +82,28 @@ Original plan:
 - HUD and `--stats` show milliseconds per stage and FPS. `--benchmark` runs a clip and prints averages.
 
 ### M3: Tracker rebuild (stable IDs, numbers per type)
+**Done 2026-10-17.** Confirmed IDs with the full program (same clips as the baseline):
+
+| | Baseline | M3 |
+|---|---|---|
+| `hands_face` hand IDs | 75 | 4 (two hands keep #1 and #2 for the first 47 s) |
+| `hands_face` face IDs | 7 ("person") | 1 |
+| `flashlight` hand IDs | 25 | 4 |
+| `flashlight` cell phone IDs | 10 | 4–6 (CoreML's GPU math varies a little between runs) |
+
+What the detection data showed, and what fixed it:
+- Hands drop out for 1–10 frames about 90 times per minute. Velocity now fades while a track is unseen, so the track waits nearby instead of drifting off.
+- Hands often leave through the bottom edge. Edge-clipped boxes keep the track's real size, and the track waits up to 3 s at the edge (`exitTimeout`).
+- Hand boxes change size up to 3× between a fist and an open hand. The size limit is now 3×, and distance is measured against the geometric mean of the two sizes.
+- The palm model sometimes reports weak, frame-sized junk boxes. Weak detections must overlap the track, and a much bigger box never matches.
+- A phone-screen "person" absorbed nearby objects. A track may change class only when the boxes overlap ≥ 0.5 (same object relabeled).
+- A false "toilet" lived on weak detections. A YOLO object seen only weakly for over 1 s is hidden, and any track without a confident detection for 5 s is dropped.
+
+`tools/replay.cpp` (`tracker_replay`) re-runs the tracker on saved detections in a fraction of a second, for tuning. A parameter sweep showed the results are stable across wide ranges.
+
+Known limitation: hands have no appearance cue, so when both are hidden at once they can swap numbers when they come back.
+
+Original plan:
 - **Concepts:**
   - *Hungarian algorithm*: finds the best overall one-to-one pairing of tracks and detections, instead of greedily taking the best pair first.
   - *ByteTrack*: a second matching pass with low-confidence detections, so a blurry hand still updates its track instead of losing it.

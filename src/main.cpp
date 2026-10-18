@@ -295,7 +295,8 @@ int main(int argc, char** argv) try {
     }
     if (!opt.saveFrames.empty()) std::filesystem::create_directories(opt.saveFrames);
 
-    Tracker tracker;
+    Tracker tracker(classes);
+    tracker.setFrameSize(camera.frameSize());
     const std::string window = "Object Tracker";
     if (opt.window) cv::namedWindow(window, cv::WINDOW_NORMAL);
 
@@ -319,7 +320,7 @@ int main(int argc, char** argv) try {
         for (const auto& t : detector.timings()) detectorMsTotal[t.name] += t.ms;
         if (dump.is_open()) dumpDetections(dump, frameIndex, tMs, detections, classes);
 
-        tracker.update(detections);
+        tracker.update(detections, tMs / 1000.0);
         if (logger) logger->log(frameIndex, tracker.tracks(), classes);
 
         // Smoothed FPS so the number doesn't flicker.
