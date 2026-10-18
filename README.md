@@ -38,11 +38,14 @@ ctest --test-dir build           # unit tests (needs googletest)
 ./build/tracker --video clips/hands_face.mov --no-window   # headless: just the log and a summary
 ./build/tracker --video clips/hands_face.mov --realtime    # play at camera speed, skipping frames when busy
 ./build/tracker --backend cpu                             # don't use CoreML
+./build/tracker --debug                                   # show light ratios and label scores
+./build/tracker --record clips/new.mov                    # also save the raw camera feed
 ./build/tracker --conf-hand 0.5                           # per-detector thresholds: --conf-yolo/-face/-hand
 ./build/tracker --list-classes
 ./build/tracker --help                   # all options
 ```
-Keys: `q` or `Esc` quits.
+Keys: `p` pause/resume, `t` trails on/off, `d` debug view on/off, `q` or `Esc` quit. Ctrl-C in the terminal also stops cleanly.
+Thin boxes are predictions: the object wasn't detected in that frame, and the tracker is keeping its box going.
 The first camera run asks for camera access: allow it for your terminal app in **System Settings → Privacy & Security → Camera**.
 
 At startup it prints where each detector runs. CoreML compiles a model on first use (a few seconds) and
@@ -69,7 +72,7 @@ Teach it a specific item, such as your mug or a person's face, from a few photos
 Telling *a* mug from *your* mug works when the photos cover the angles you'll show it from. Two identical products (two of the same phone) can't be told apart from pictures alone.
 
 ## Logs
-Each run writes `logs/run_<date>_<time>.csv`. To summarize one or more runs:
+Each run writes `logs/run_<date>_<time>.csv`: one row per visible track per frame. The columns are `time_ms`, `frame`, `id` (unique for the run), `number` (the one on screen), `class`, `label`, `matched` (0 = predicted box), the box, `conf`, `target` and `light_ratio` (faces). To summarize one or more runs:
 ```sh
 scripts/log_stats.py logs/run_*.csv
 ```

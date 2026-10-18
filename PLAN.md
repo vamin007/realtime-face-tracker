@@ -1,5 +1,25 @@
 # Plan: Object Tracker v2
 
+## Status (2026-10-17): M0–M6 done on the `v2` branch
+Measured on the reference clips, with everything on:
+
+| | Baseline (`main`) | v2 |
+|---|---|---|
+| Live speed (`--realtime`, labels on) | ~10 FPS | 30.0 FPS (camera's maximum), no skipped frames |
+| `hands_face.mov` hand IDs | 75 | 4 |
+| `flashlight.mov` hand IDs | 25 | 4 |
+| Face IDs | 7 (shown as "person") | 1 per clip |
+| TARGET on flashlight episodes | — | 10 / 10, each within 0.2 s; none in `hands_face.mov` |
+| Custom labels (photos from the clips) | — | face recognized in 99% of frames, phone in 75% |
+| Unit tests | 0 | 71 |
+
+Still to do by the user, with the live camera (no clip covers these):
+- a live run: camera capture runs on a background thread now;
+- enrolling a real object from 5–10 photos;
+- telling two different items of the same class apart.
+
+Each milestone section below starts with what was built and measured. The original plan text follows it.
+
 ## Context
 On live camera the tracker runs at about 10 FPS. Its IDs keep changing: the 62 s run in `logs/run_20261004_214134.csv` created 139 track IDs, 18 of them for two hands. "person" secretly means a face, and the project has no git repo and no tests. This plan fixes those problems and adds four features: higher FPS, numbering per type with face and hand as separate types, custom labels learned from photos, and bright-light face targeting. The goal is stable IDs at about 30 FPS with all of those features.
 
@@ -226,6 +246,25 @@ class  LabelLibrary  { load(dir); enroll(...); match(baseClass, emb) -> LabelMat
 - **Display:** `my_mug`, with no number. A label is one specific item, so a number would always be #1. The `cup #N` number the track had before is not handed out again.
 
 ### M6: Polish
+**Done 2026-10-17.** Most of it landed during M1–M5:
+- checked flag values, trimmed `--classes`, removed redundant flags;
+- options in `Options.cpp`, unit tested;
+- log with frame time, `matched`, `label`, `target` and `light_ratio`, flushed every second;
+- clean shutdown on Ctrl-C;
+- `--realtime`, the actual camera resolution printed at startup;
+- label text black or white for contrast, HUD timings per detector;
+- keys `p` and `t`.
+
+Added in M6:
+- `--record PATH`: the raw, unmirrored feed, which plays back with `--video`.
+- The debug view (`--debug`, key `d`): each face's light ratio and rise, and each track's closest label and score.
+- Predicted boxes drawn thinner.
+- A hand blocks a face's light measurement only if it was confidently detected in the last 0.5 s. The debug view showed a weak phantom "hand" on the face blocking it.
+- Hands and faces seen only weakly for over 2 s are hidden. They keep their IDs until 5 s without a confident detection.
+
+Not done: `--models-dir` (the default paths suffice). `Track` stayed copyable instead of move-only, because the Kalman filter is now a plain value type (`KalmanBox`), so copies no longer share state.
+
+Original plan:
 - **CLI:** checked numbers with clear errors, ranges enforced, spaces trimmed in `--classes`, redundant flags removed (`--person-by-face`, `--enable-hands`, `--no-trail`), `--models-dir`.
 - **Logger:** new columns `t_capture_ms,frame,uid,type,number,class,label,state,x,y,w,h,conf,target,light_ratio`. Timestamps are capture time. It flushes every second, and Ctrl-C shuts down cleanly.
 - **Video:** `--realtime` plays at the file's own FPS. `--record out.mp4` saves the raw camera feed for making new test clips.

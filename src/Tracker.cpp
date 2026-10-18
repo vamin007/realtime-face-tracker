@@ -227,10 +227,12 @@ void Tracker::update(const std::vector<Detection>& detections, double now) {
         const bool inView =
             frameSize_.empty() ||
             (t.box & cv::Rect2f(0, 0, frameSize_.width, frameSize_.height)).area() > 0;
-        // YOLO's weak detections (80 classes) are often wrong, so an object seen
-        // only weakly is hidden sooner; the face and hand models' weak ones are reliable.
-        const bool weakOnlyTooLong =
-            kindOf(t.classId) == ClassKind::Object && now - t.lastStrong > params_.weakBridge;
+        // A track seen only weakly for a while is hidden (it may be a false
+        // detection). YOLO's weak detections (80 classes) are wrong more often than
+        // the face and hand models', so objects are hidden sooner.
+        const double bridge = kindOf(t.classId) == ClassKind::Object ? params_.weakBridge
+                                                                     : params_.weakBridgeFaceHand;
+        const bool weakOnlyTooLong = now - t.lastStrong > bridge;
         t.visible =
             t.confirmed && inView && now - t.lastSeen <= params_.coastTime && !weakOnlyTooLong;
     }

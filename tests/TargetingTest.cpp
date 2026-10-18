@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 #include "Targeting.h"
 
 namespace {
@@ -33,13 +35,20 @@ Track makeTrack(int id, ClassId cls, const cv::Rect2f& box) {
 
 class TargetingTest : public ::testing::Test {
 protected:
-    // Runs `frames` frames of a scene and returns how many had a target.
-    int run(TargetSelector& selector, const Scene& scene, const std::vector<Track>& tracks,
-            int frames) {
+    // Runs `frames` frames of a scene and returns how many had a target. Tracks
+    // count as confidently detected in every frame unless `weakIds` lists them.
+    int run(TargetSelector& selector, const Scene& scene, std::vector<Track> tracks, int frames,
+            const std::vector<int>& weakIds = {}) {
         const cv::Mat frame = scene.render();
         int targeted = 0;
         for (int i = 0; i < frames; ++i, ++frame_) {
-            if (selector.update(frame, tracks, frame_ * kFrame).active()) ++targeted;
+            const double now = frame_ * kFrame;
+            for (Track& t : tracks) {
+                t.lastSeen = now;
+                if (std::find(weakIds.begin(), weakIds.end(), t.id) == weakIds.end())
+                    t.lastStrong = now;
+            }
+            if (selector.update(frame, tracks, now).active()) ++targeted;
         }
         return targeted;
     }
@@ -124,6 +133,21 @@ TEST_F(TargetingTest, AHandInFrontOfTheFaceIsNotALight) {
     tracks.push_back(makeTrack(2, classes.hand(), handBox));
     scene.patches = {{handBox, 200}};  // a palm held up to the face, lit by a window
     EXPECT_EQ(run(selector, scene, tracks, 90), 0);
+}
+
+// The palm model sometimes weakly mistakes a face for a palm; such a "hand"
+// mustn't stop the face from being measured.
+TEST_F(TargetingTest, AWeakPhantomHandDoesNotBlockTheFace) {
+    TargetSelector selector(classes);
+    const cv::Rect2f phantom(560, 220, 170, 230);
+    const std::vector<Track> tracks = {makeTrack(1, classes.face(), kFaceBox),
+                                       makeTrack(2, classes.hand(), phantom)};
+    Scene scene;
+    run(selector, scene, tracks, 60, {2});
+    scene.face = 190;
+    scene.room = 110;
+    run(selector, scene, tracks, 6, {2});
+    EXPECT_TRUE(selector.target().active());
 }
 
 TEST_F(TargetingTest, BrightestOfTwoLitFacesWins) {

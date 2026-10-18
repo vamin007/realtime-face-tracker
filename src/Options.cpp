@@ -69,6 +69,8 @@ void printUsage() {
            "  --no-window           don't show a window (video files only)\n"
            "  --no-mirror           don't flip the camera image horizontally\n"
            "  --show-trail          draw a motion trail behind each track\n"
+           "  --debug               show brightness and recognition details on the boxes\n"
+           "  --record PATH         save the raw camera feed as a video (e.g. clips/new.mov)\n"
            "  --no-log              don't write a CSV log\n"
            "\nDetection:\n"
            "  --conf N              confidence threshold for all detectors, 0..1\n"
@@ -106,7 +108,7 @@ void printUsage() {
            "  --save-every N            with --save-frames: every Nth frame (default 30)\n"
            "  --sequential              run the detectors one after another\n"
            "  --face-width N            width faces are detected at (default 640, 0 = full)\n"
-           "\nKeys: p pause/resume, t trails on/off, q or Esc quit.\n";
+           "\nKeys: p pause/resume, t trails on/off, d debug view on/off, q or Esc quit.\n";
 }
 
 bool parseArgs(const std::vector<std::string>& args, Options& opt) {
@@ -124,6 +126,8 @@ bool parseArgs(const std::vector<std::string>& args, Options& opt) {
         else if (arg == "--no-window") opt.window = false;
         else if (arg == "--no-mirror") opt.mirror = false;
         else if (arg == "--show-trail") opt.showTrail = true;
+        else if (arg == "--debug") opt.debug = true;
+        else if (arg == "--record") opt.record = next();
         else if (arg == "--no-log") opt.log = false;
         else if (arg == "--conf")
             opt.confYolo = opt.confFace = opt.confHand = parseFloat(arg, next(), 0, 1);

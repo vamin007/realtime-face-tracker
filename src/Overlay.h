@@ -14,12 +14,17 @@ struct HudInfo {
     int visibleTracks;
 };
 
-// Draws every visible track except the target (drawn by drawTarget). Tracks
-// the recognizer gave a custom label show that label instead of "class #n".
+struct DrawOptions {
+    bool trails = false;                        // motion trail behind each track
+    bool debug = false;                         // brightness and recognition details
+    const TargetSelector* targeting = nullptr;  // the TARGET; null when targeting is off
+    const Recognizer* recognizer = nullptr;     // custom labels; null when there are none
+};
+
+// Draws every visible track: "class #n", a custom label instead when the
+// recognizer gave it one, or a thick red "TARGET" box for the target.
 void drawTracks(cv::Mat& frame, const std::vector<Track>& tracks, const ClassRegistry& classes,
-                bool showTrail = false, int targetId = -1, const Recognizer* recognizer = nullptr);
-// The target: a thick red box labeled "TARGET".
-void drawTarget(cv::Mat& frame, const Target& target);
+                const DrawOptions& options);
 void drawHud(cv::Mat& frame, const HudInfo& info);
 
 // A track is drawn and logged once confirmed, while seen recently (see TrackerParams::coastTime).

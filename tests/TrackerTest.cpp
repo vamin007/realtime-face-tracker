@@ -203,11 +203,17 @@ TEST_F(TrackerTest, WeakDetectionsAloneDontKeepATrackForever) {
 }
 
 // The hand model's weak detections are reliable: a hand seen only weakly stays shown.
-TEST_F(TrackerTest, WeaklySeenHandStaysVisible) {
+// The hand model's weak detections are more reliable than YOLO's: a hand seen
+// only weakly stays shown for 2 s (an object for 1 s), and keeps its ID longer.
+TEST_F(TrackerTest, WeaklySeenHandStaysVisibleLonger) {
     Tracker tracker(classes);
     for (int f = 0; f < 5; ++f) step(tracker, {det(300, 300, classes.hand())});
-    for (int f = 0; f < 60; ++f) step(tracker, {weakDet(300, 300, classes.hand())});
+    for (int f = 0; f < 45; ++f) step(tracker, {weakDet(300, 300, classes.hand())});  // 1.5 s
     EXPECT_EQ(visibleIds(tracker).size(), 1u);
+    for (int f = 0; f < 30; ++f) step(tracker, {weakDet(300, 300, classes.hand())});  // 2.5 s
+    EXPECT_TRUE(visibleIds(tracker).empty()) << "hidden after 2 s of weak detections only";
+    for (int f = 0; f < 3; ++f) step(tracker, {det(300, 300, classes.hand())});
+    EXPECT_EQ(seen_.size(), 1u) << "a confident detection brings back the same track";
 }
 
 TEST_F(TrackerTest, DuplicateBoxesMakeOneTrack) {

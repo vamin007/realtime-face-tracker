@@ -72,7 +72,11 @@ const Target& TargetSelector::update(const cv::Mat& frame, const std::vector<Tra
     for (const Track& t : tracks) {
         if (!t.visible) continue;
         if (isFace(t)) faceBoxes.push_back(t.box);
-        if (classes_.kind(classes_.base(t.classId)) == ClassKind::Hand) handBoxes.push_back(t.box);
+        // Only a hand detected confidently just now counts as being in front of a
+        // face: the palm model sometimes weakly mistakes a face for a palm.
+        if (classes_.kind(classes_.base(t.classId)) == ClassKind::Hand &&
+            now - t.lastStrong <= params_.handRecent)
+            handBoxes.push_back(t.box);
     }
     background_ = std::max(backgroundLuma(frame, faceBoxes), 1.0f);
 

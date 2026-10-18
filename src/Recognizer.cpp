@@ -93,18 +93,17 @@ void Recognizer::apply(const Result& result, const std::string& baseClass) {
     const LabelMatch m =
         library_.match(baseClass, result.embedding, thresholds_[result.kind], params_.minMargin);
     if (m.label >= 0) ++id.votes[m.label];
-    if (debug_) {
-        float best = 0;
-        std::string bestName;
-        for (const CustomLabel& label : library_.labels()) {
-            if (label.baseClass != baseClass) continue;
-            const float s = labelScore(label, result.embedding);
-            if (bestName.empty() || s > best) best = s, bestName = label.name;
-        }
-        *debug_ << now_ << ',' << result.trackId << ',' << baseClass << ',' << bestName << ','
-                << best << ',' << m.runnerUp << ',' << (m.label >= 0 ? 1 : 0) << ','
-                << (id.label >= 0 ? library_.labels()[id.label].name : "") << '\n';
+    // The closest label, matched or not (for the debug view and dump).
+    id.closest.clear();
+    for (const CustomLabel& label : library_.labels()) {
+        if (label.baseClass != baseClass) continue;
+        const float s = labelScore(label, result.embedding);
+        if (id.closest.empty() || s > id.closestScore) id.closestScore = s, id.closest = label.name;
     }
+    if (debug_)
+        *debug_ << now_ << ',' << result.trackId << ',' << baseClass << ',' << id.closest << ','
+                << id.closestScore << ',' << m.runnerUp << ',' << (m.label >= 0 ? 1 : 0) << ','
+                << (id.label >= 0 ? library_.labels()[id.label].name : "") << '\n';
 
     if (id.label >= 0) {
         if (m.label == id.label) {

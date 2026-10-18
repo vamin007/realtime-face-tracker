@@ -35,36 +35,86 @@ void drawLabel(cv::Mat& frame, const std::string& text, cv::Point origin, const 
                 textColorOn(bg), 2, cv::LINE_AA);
 }
 
+// Debug view: why a face is or isn't the TARGET, and how close a track is to a label.
+std::string debugText(const Track& t, const DrawOptions& options) {
+    char buf[96];
+    std::string text;
+    if (options.targeting) {
+        const auto it = options.targeting->faces().find(t.id);
+        if (it != options.targeting->faces().end()) {
+            const FaceLight& f = it->second;
+            if (f.blocked) text = "light: not measured";
+            else
+                std::snprintf(buf, sizeof(buf), "light %.2fx room, %.2fx normal", f.ratio,
+                              f.rise()),
+                    text = buf;
+        }
+    }
+    if (options.recognizer) {
+        if (const TrackIdentity* id = options.recognizer->identity(t.id);
+            id && !id->closest.empty()) {
+            std::snprintf(buf, sizeof(buf), "closest label %s %.2f", id->closest.c_str(),
+                          id->closestScore);
+            if (!text.empty()) text += " | ";
+            text += buf;
+        }
+    }
+    return text;
+}
+
+void drawTrack(cv::Mat& frame, const Track& t, const std::string& label, const cv::Scalar& color,
+               int thickness, const DrawOptions& options) {
+    if (options.trails) {
+        for (size_t i = 1; i < t.trail.size(); ++i) {
+            const int w = 1 + static_cast<int>(3 * i / t.trail.size());
+            cv::line(frame, t.trail[i - 1], t.trail[i], color, w, cv::LINE_AA);
+        }
+    }
+    // A box kept on its prediction (no detection this frame) is drawn thinner.
+    cv::rectangle(frame, t.box, color, t.matched ? thickness : 1);
+    drawLabel(frame, label, {static_cast<int>(t.box.x), static_cast<int>(t.box.y)}, color);
+    if (options.debug) {
+        const std::string extra = debugText(t, options);
+        if (!extra.empty())
+            drawLabel(frame, extra, {static_cast<int>(t.box.x), static_cast<int>(t.box.y) + 24},
+                      cv::Scalar(40, 40, 40));
+    }
+}
+
 }  // namespace
 
 void drawTracks(cv::Mat& frame, const std::vector<Track>& tracks, const ClassRegistry& classes,
-                bool showTrail, int targetId, const Recognizer* recognizer) {
+                const DrawOptions& options) {
+    const Target* target = options.targeting ? &options.targeting->target() : nullptr;
     for (const Track& t : tracks) {
-        if (!isVisible(t) || t.id == targetId) continue;
-        const cv::Scalar color = colorForId(t.id);
-        if (showTrail) {
-            for (size_t i = 1; i < t.trail.size(); ++i) {
-                const int thickness = 1 + static_cast<int>(3 * i / t.trail.size());
-                cv::line(frame, t.trail[i - 1], t.trail[i], color, thickness, cv::LINE_AA);
-            }
+        if (!isVisible(t)) continue;
+        if (target && t.id == target->trackId) {
+            drawTrack(frame, t, "TARGET", kTargetRed, 3, options);
+            continue;
         }
-        cv::rectangle(frame, t.box, color, 2);
         char label[96];
         // A custom label is one specific item, so it needs no number.
-        const std::string* custom = recognizer ? recognizer->labelName(t.id) : nullptr;
+        const std::string* custom =
+            options.recognizer ? options.recognizer->labelName(t.id) : nullptr;
         if (custom) std::snprintf(label, sizeof(label), "%s %.2f", custom->c_str(), t.conf);
         else
             std::snprintf(label, sizeof(label), "%s #%d %.2f", classes.name(t.classId).c_str(),
                           t.number, t.conf);
-        drawLabel(frame, label, {static_cast<int>(t.box.x), static_cast<int>(t.box.y)}, color);
+        drawTrack(frame, t, label, colorForId(t.id), 2, options);
     }
-}
-
-void drawTarget(cv::Mat& frame, const Target& target) {
-    if (!target.active()) return;
-    cv::rectangle(frame, target.box, kTargetRed, 3);
-    drawLabel(frame, "TARGET", {static_cast<int>(target.box.x), static_cast<int>(target.box.y)},
-              kTargetRed);
+    // The target can be briefly undetected (its track then isn't visible): keep
+    // showing it on its last box.
+    if (target && target->active()) {
+        const bool drawn = std::any_of(tracks.begin(), tracks.end(), [&](const Track& t) {
+            return t.id == target->trackId && isVisible(t);
+        });
+        if (!drawn) {
+            cv::rectangle(frame, target->box, kTargetRed, 3);
+            drawLabel(frame, "TARGET",
+                      {static_cast<int>(target->box.x), static_cast<int>(target->box.y)},
+                      kTargetRed);
+        }
+    }
 }
 
 void drawHud(cv::Mat& frame, const HudInfo& info) {

@@ -38,7 +38,8 @@ struct TrackerParams {
                                     //    (hands often vanish for over a second, e.g. in hair)
     double exitTimeout = 3.0;       // s: ... or this long if it was last seen at the frame edge
     double coastTime = 0.2;         // s: a missing confirmed track stays visible this long
-    double weakBridge = 1.0;   // s: weak detections alone keep an object (YOLO) visible this long
+    double weakBridge = 1.0;  // s: weak detections alone keep an object (YOLO) visible this long
+    double weakBridgeFaceHand = 2.0;  // s: ... and a face or hand
     double weakTimeout = 5.0;  // s: any track with no confident detection this long is dropped
     double velocityHalfLife = 0.15;  // s: while unseen, a track's velocity halves this often
 

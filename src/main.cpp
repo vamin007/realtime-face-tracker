@@ -283,14 +283,34 @@ int main(int argc, char** argv) try {
     long long frameIndex = 0;
     cv::Mat frame;
     double tMs = 0;
-    bool showTrail = opt.showTrail;
+    DrawOptions draw;
+    draw.trails = opt.showTrail;
+    draw.debug = opt.debug;
+    draw.targeting = opt.targeting ? &targeting : nullptr;
+    draw.recognizer = recognizer.get();
     // Running totals for the summary at the end.
     double detectMsTotal = 0;
     std::map<std::string, double> detectorMsTotal;
     std::vector<Track> filtered;
 
+    cv::VideoWriter recorder;
+    if (!opt.record.empty()) {
+        // H.264 where the system offers it (AVFoundation on macOS), else MPEG-4.
+        for (const char* codec : {"avc1", "mp4v"}) {
+            recorder.open(opt.record,
+                          cv::VideoWriter::fourcc(codec[0], codec[1], codec[2], codec[3]),
+                          camera.fps(), camera.frameSize());
+            if (recorder.isOpened()) break;
+        }
+        if (!recorder.isOpened()) throw std::runtime_error("Can't record to " + opt.record);
+        std::cout << "Recording the raw feed to " << opt.record << '\n';
+    }
+
     while (!gStop && (opt.maxFrames == 0 || frameIndex < opt.maxFrames) &&
            camera.read(frame, tMs)) {
+        // Recorded as the camera delivers it (not mirrored), like a QuickTime recording,
+        // so it plays back with --video exactly as it was seen.
+        if (recorder.isOpened()) recorder.write(frame);
         if (opt.mirror && camera.isLive()) cv::flip(frame, frame, 1);
 
         const auto t0 = Clock::now();
@@ -325,8 +345,7 @@ int main(int argc, char** argv) try {
 
         int visible = 0;
         for (const Track& t : *shown) visible += isVisible(t);
-        drawTracks(frame, *shown, classes, showTrail, targeting.target().trackId, recognizer.get());
-        drawTarget(frame, targeting.target());
+        drawTracks(frame, *shown, classes, draw);
         drawHud(frame, {fps, detector.timings(), visible});
         if (!opt.saveFrames.empty() && frameIndex % opt.saveEvery == 0) {
             char name[32];
@@ -340,7 +359,8 @@ int main(int argc, char** argv) try {
                 do key = cv::waitKey(50);
                 while (key != 'p' && key != 'q' && key != 27 && !gStop);
             }
-            if (key == 't') showTrail = !showTrail;
+            if (key == 't') draw.trails = !draw.trails;
+            if (key == 'd') draw.debug = !draw.debug;
             if (key == 27 || key == 'q') break;
         }
         ++frameIndex;

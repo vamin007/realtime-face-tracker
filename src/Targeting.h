@@ -33,6 +33,7 @@ struct TargetParams {
     float switchMargin = 0.2f;   // another face takes over only if its ratio is this much higher
     double coastTime = 0.5;      // s the target stays on while its face can't be measured
     float maxHandCover = 0.25f;  // a face covered more than this by a hand isn't measured
+    double handRecent = 0.5;     // s: ... if that hand was confidently detected this recently
 };
 
 // Brightness state of one face track.

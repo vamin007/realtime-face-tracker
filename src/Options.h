@@ -29,6 +29,8 @@ struct Options {
     bool hands = true;
     bool labels = true;  // recognize custom labels
     bool showTrail = false;
+    bool debug = false;  // show brightness and recognition details on the boxes
+    std::string record;  // save the raw camera feed to this video file
     bool window = true;
     bool targeting = true;
     TargetParams target;

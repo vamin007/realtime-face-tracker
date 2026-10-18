@@ -50,6 +50,8 @@ struct TrackIdentity {
     double askedAt = -1;       // when this track was last sent for embedding
     float askedSize = 0;       // its size then
     bool pending = false;
+    std::string closest;     // the closest label in the latest check, matched or not
+    float closestScore = 0;  // ... and its score
 };
 
 // Gives tracks custom labels. Each frame it sends a few crops of tracks whose
