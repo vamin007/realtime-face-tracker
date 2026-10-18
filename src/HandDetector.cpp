@@ -1,133 +1,128 @@
 #include "HandDetector.h"
 
 #include <cmath>
-#include <iostream>
 #include <opencv2/imgproc.hpp>
+#include <stdexcept>
 
-HandDetector::HandDetector() = default;
+namespace {
 
-HandDetector::HandDetector(const std::string& modelPath, float scoreThresh, float nmsThresh) {
-    load(modelPath, scoreThresh, nmsThresh);
-}
+constexpr int kInputSize = 192;  // the palm model's square input
+constexpr int kKeypoints = 7;
 
-std::vector<cv::Point2f> HandDetector::generateAnchors() {
+// Hand geometry relative to the palm box size: the hand is about twice as long
+// as the palm (fingers included), a bit wider (thumb), and centered half a palm
+// toward the fingers.
+constexpr float kHandLength = 2.0f;
+constexpr float kHandWidth = 1.5f;
+constexpr float kHandShift = 0.5f;
+
+// SSD anchors of MediaPipe's 192x192 palm model: a 24x24 grid with 2 anchors per
+// cell (stride 8), then a 12x12 grid with 6 per cell (stride 16). 2016 in total.
+std::vector<cv::Point2f> palmAnchors() {
     std::vector<cv::Point2f> anchors;
     anchors.reserve(2016);
-    // Stride 8: 24x24 grid, 2 anchors per cell
-    for (int y = 0; y < 24; ++y) {
-        const float yc = (y + 0.5f) / 24.0f;
-        for (int x = 0; x < 24; ++x) {
-            const float xc = (x + 0.5f) / 24.0f;
-            anchors.emplace_back(xc, yc);
-            anchors.emplace_back(xc, yc);
-        }
-    }
-    // Stride 16: 12x12 grid, 6 anchors per cell
-    for (int y = 0; y < 12; ++y) {
-        const float yc = (y + 0.5f) / 12.0f;
-        for (int x = 0; x < 12; ++x) {
-            const float xc = (x + 0.5f) / 12.0f;
-            for (int k = 0; k < 6; ++k) {
-                anchors.emplace_back(xc, yc);
-            }
-        }
-    }
+    for (int y = 0; y < 24; ++y)
+        for (int x = 0; x < 24; ++x)
+            for (int k = 0; k < 2; ++k) anchors.emplace_back((x + 0.5f) / 24, (y + 0.5f) / 24);
+    for (int y = 0; y < 12; ++y)
+        for (int x = 0; x < 12; ++x)
+            for (int k = 0; k < 6; ++k) anchors.emplace_back((x + 0.5f) / 12, (y + 0.5f) / 12);
     return anchors;
 }
 
-bool HandDetector::load(const std::string& modelPath, float scoreThresh, float nmsThresh) {
-    scoreThresh_ = scoreThresh;
-    nmsThresh_ = nmsThresh;
-    try {
-        net_ = cv::dnn::readNet(modelPath);
-        if (net_.empty()) return false;
-        anchors_ = generateAnchors();
-        return true;
-    } catch (const std::exception& e) {
-        std::cerr << "Warning: Failed to load HandDetector from " << modelPath << ": " << e.what() << '\n';
-        return false;
+}  // namespace
+
+cv::Rect2f handBoxFromPalm(const cv::Rect2f& palm, const std::vector<cv::Point2f>& keypoints) {
+    const cv::Point2f center(palm.x + palm.width / 2, palm.y + palm.height / 2);
+    const float size = std::max(palm.width, palm.height);
+    cv::Point2f dir(0, -1);  // fingers up when the keypoints don't say otherwise
+    if (keypoints.size() >= 3) {
+        const cv::Point2f v = keypoints[2] - keypoints[0];  // wrist -> middle finger base
+        const float len = std::hypot(v.x, v.y);
+        if (len > 1e-3f) dir = v / len;
     }
+    const cv::Point2f handCenter = center + dir * (kHandShift * size);
+    const float angle = std::atan2(dir.y, dir.x) * 180.0f / static_cast<float>(CV_PI);
+    const cv::RotatedRect hand(handCenter, cv::Size2f(kHandLength * size, kHandWidth * size),
+                               angle);
+    return hand.boundingRect2f();
 }
 
-std::vector<Detection> HandDetector::detect(const cv::Mat& frame, float confThreshold, int classId) {
-    std::vector<Detection> detections;
-    if (net_.empty() || frame.empty()) return detections;
+HandDetector::HandDetector(const std::string& modelPath, ClassId handClass,
+                           DetectorThresholds thresholds)
+    : handClass_(handClass), th_(thresholds), anchors_(palmAnchors()) {
+    requireModelFile(modelPath);
+    net_ = cv::dnn::readNet(modelPath);
+    if (net_.empty()) throw std::runtime_error("Failed to load hand model: " + modelPath);
+}
 
-    const float thresh = confThreshold > 0.0f ? confThreshold : scoreThresh_;
-
-    // Letterbox to 192x192
-    constexpr int kInputSize = 192;
+std::vector<Detection> HandDetector::detect(const cv::Mat& frame) {
+    // Letterbox to 192x192, centered, padded with black.
     const float ratio = std::min(static_cast<float>(kInputSize) / frame.cols,
                                  static_cast<float>(kInputSize) / frame.rows);
-    const cv::Size ratioSize(static_cast<int>(frame.cols * ratio),
-                             static_cast<int>(frame.rows * ratio));
+    const cv::Size fitted(static_cast<int>(frame.cols * ratio),
+                          static_cast<int>(frame.rows * ratio));
     cv::Mat resized;
-    cv::resize(frame, resized, ratioSize);
-
-    const int padW = kInputSize - ratioSize.width;
-    const int padH = kInputSize - ratioSize.height;
-    const int padX = padW / 2;
-    const int padY = padH / 2;
-
+    cv::resize(frame, resized, fitted);
+    const int padX = (kInputSize - fitted.width) / 2;
+    const int padY = (kInputSize - fitted.height) / 2;
     cv::Mat padded;
-    cv::copyMakeBorder(resized, padded, padY, padH - padY, padX, padW - padX,
-                       cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
+    cv::copyMakeBorder(resized, padded, padY, kInputSize - fitted.height - padY, padX,
+                       kInputSize - fitted.width - padX, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
 
-    // NHWC float RGB blob [1, 192, 192, 3]
-    cv::Mat rgb;
+    // NHWC float RGB blob [1, 192, 192, 3] in 0..1.
+    cv::Mat rgb, floatImg;
     cv::cvtColor(padded, rgb, cv::COLOR_BGR2RGB);
-    cv::Mat floatImg;
     rgb.convertTo(floatImg, CV_32F, 1.0 / 255.0);
-    int sz[] = {1, kInputSize, kInputSize, 3};
-    cv::Mat blob(4, sz, CV_32F, floatImg.data);
-
-    net_.setInput(blob);
+    const int shape[] = {1, kInputSize, kInputSize, 3};
+    net_.setInput(cv::Mat(4, shape, CV_32F, floatImg.data));
     std::vector<cv::Mat> outputs;
     net_.forward(outputs, net_.getUnconnectedOutLayersNames());
+    if (outputs.size() < 2) return {};
 
-    if (outputs.size() < 2) return detections;
+    // outputs[0]: per anchor 18 values (box cx, cy, w, h, then 7 keypoint x, y),
+    // as offsets in input pixels from the anchor. outputs[1]: per anchor a score logit.
+    const cv::Mat raw = outputs[0].reshape(1, static_cast<int>(outputs[0].total() / 18));
+    const cv::Mat logits = outputs[1].reshape(1, static_cast<int>(outputs[1].total()));
+    const float scale = static_cast<float>(std::max(frame.cols, frame.rows));
+    const cv::Point2f padBias(padX / ratio, padY / ratio);
+    auto toFrame = [&](float dx, float dy, const cv::Point2f& anchor) {
+        return cv::Point2f((dx / kInputSize + anchor.x) * scale,
+                           (dy / kInputSize + anchor.y) * scale) -
+               padBias;
+    };
 
-    cv::Mat boxes = outputs[0].reshape(1, outputs[0].total() / 18);
-    cv::Mat scores = outputs[1].reshape(1, outputs[1].total());
-
-    const float scale = std::max(frame.cols, frame.rows);
-    const float padBiasX = padX / ratio;
-    const float padBiasY = padY / ratio;
-
-    std::vector<cv::Rect2d> candBoxes;
-    std::vector<float> candScores;
-
-    for (int i = 0; i < scores.rows && i < static_cast<int>(anchors_.size()); ++i) {
-        const float rawScore = scores.at<float>(i, 0);
-        const float score = 1.0f / (1.0f + std::exp(-rawScore));
-        if (score < thresh) continue;
-
-        const float* b = boxes.ptr<float>(i);
-        const cv::Point2f& anchor = anchors_[i];
-
-        const float cxDelta = b[0] / static_cast<float>(kInputSize);
-        const float cyDelta = b[1] / static_cast<float>(kInputSize);
-        const float wDelta  = b[2] / static_cast<float>(kInputSize);
-        const float hDelta  = b[3] / static_cast<float>(kInputSize);
-
-        const float x1 = ((cxDelta - wDelta / 2.0f + anchor.x) * scale) - padBiasX;
-        const float y1 = ((cyDelta - hDelta / 2.0f + anchor.y) * scale) - padBiasY;
-        const float x2 = ((cxDelta + wDelta / 2.0f + anchor.x) * scale) - padBiasX;
-        const float y2 = ((cyDelta + hDelta / 2.0f + anchor.y) * scale) - padBiasY;
-
-        candBoxes.emplace_back(x1, y1, std::max(1.0f, x2 - x1), std::max(1.0f, y2 - y1));
-        candScores.push_back(score);
+    std::vector<cv::Rect2d> palms;
+    std::vector<float> scores;
+    std::vector<int> rows;
+    const int n = std::min(logits.rows, static_cast<int>(anchors_.size()));
+    for (int i = 0; i < n; ++i) {
+        const float score = 1.0f / (1.0f + std::exp(-logits.at<float>(i, 0)));
+        if (score < th_.low) continue;
+        const float* b = raw.ptr<float>(i);
+        const cv::Point2f tl = toFrame(b[0] - b[2] / 2, b[1] - b[3] / 2, anchors_[i]);
+        const cv::Point2f br = toFrame(b[0] + b[2] / 2, b[1] + b[3] / 2, anchors_[i]);
+        palms.emplace_back(tl.x, tl.y, std::max(1.0f, br.x - tl.x), std::max(1.0f, br.y - tl.y));
+        scores.push_back(score);
+        rows.push_back(i);
     }
 
     std::vector<int> keep;
-    cv::dnn::NMSBoxes(candBoxes, candScores, thresh, nmsThresh_, keep);
+    cv::dnn::NMSBoxes(palms, scores, th_.low, th_.nms, keep);
 
     const cv::Rect2f bounds(0, 0, static_cast<float>(frame.cols), static_cast<float>(frame.rows));
-    for (int idx : keep) {
-        cv::Rect2f box = cv::Rect2f(candBoxes[idx]) & bounds;
-        if (box.area() <= 0) continue;
-        detections.push_back({box, classId, candScores[idx]});
+    std::vector<Detection> result;
+    for (int k : keep) {
+        const float* b = raw.ptr<float>(rows[k]);
+        Detection d;
+        for (int p = 0; p < kKeypoints; ++p)
+            d.keypoints.push_back(toFrame(b[4 + 2 * p], b[5 + 2 * p], anchors_[rows[k]]));
+        d.box = handBoxFromPalm(cv::Rect2f(palms[k]), d.keypoints) & bounds;
+        if (d.box.area() <= 0) continue;
+        d.classId = handClass_;
+        d.conf = scores[k];
+        d.weak = d.conf < th_.conf;
+        result.push_back(std::move(d));
     }
-
-    return detections;
+    return result;
 }

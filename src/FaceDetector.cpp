@@ -1,52 +1,37 @@
 #include "FaceDetector.h"
 
-#include <iostream>
+#include <stdexcept>
 
-FaceDetector::FaceDetector() = default;
-
-FaceDetector::FaceDetector(const std::string& modelPath, float scoreThresh, float nmsThresh) {
-    load(modelPath, scoreThresh, nmsThresh);
+FaceDetector::FaceDetector(const std::string& modelPath, ClassId faceClass,
+                           DetectorThresholds thresholds)
+    : faceClass_(faceClass), th_(thresholds) {
+    requireModelFile(modelPath);
+    // The input size is set per frame in detect().
+    net_ = cv::FaceDetectorYN::create(modelPath, "", cv::Size(320, 320), th_.low, th_.nms);
+    if (!net_) throw std::runtime_error("Failed to load face model: " + modelPath);
 }
 
-bool FaceDetector::load(const std::string& modelPath, float scoreThresh, float nmsThresh) {
-    scoreThresh_ = scoreThresh;
-    nmsThresh_ = nmsThresh;
-    try {
-        net_ = cv::FaceDetectorYN::create(modelPath, "", cv::Size(320, 320), scoreThresh_, nmsThresh_);
-        return static_cast<bool>(net_);
-    } catch (const std::exception& e) {
-        std::cerr << "Warning: Failed to initialize FaceDetectorYN from " << modelPath << ": " << e.what() << '\n';
-        net_.release();
-        return false;
-    }
-}
-
-std::vector<Detection> FaceDetector::detect(const cv::Mat& frame, float confThreshold, int classId) {
-    std::vector<Detection> detections;
-    if (!net_ || frame.empty()) return detections;
-
-    if (frame.size() != lastSize_) {
+std::vector<Detection> FaceDetector::detect(const cv::Mat& frame) {
+    if (frame.size() != inputSize_) {
         net_->setInputSize(frame.size());
-        lastSize_ = frame.size();
+        inputSize_ = frame.size();
     }
-    net_->setScoreThreshold(confThreshold > 0.0f ? confThreshold : scoreThresh_);
-
-    cv::Mat faces;
+    cv::Mat faces;  // one row per face: x, y, w, h, 5 landmark (x, y) pairs, score
     net_->detect(frame, faces);
 
     const cv::Rect2f bounds(0, 0, static_cast<float>(frame.cols), static_cast<float>(frame.rows));
+    std::vector<Detection> result;
     for (int i = 0; i < faces.rows; ++i) {
-        const float x = faces.at<float>(i, 0);
-        const float y = faces.at<float>(i, 1);
-        const float w = faces.at<float>(i, 2);
-        const float h = faces.at<float>(i, 3);
-        const float conf = faces.at<float>(i, 14);
-
-        if (conf < confThreshold) continue;
-        cv::Rect2f box = cv::Rect2f(x, y, w, h) & bounds;
+        const float* f = faces.ptr<float>(i);
+        const cv::Rect2f box = cv::Rect2f(f[0], f[1], f[2], f[3]) & bounds;
         if (box.area() <= 0) continue;
-
-        detections.push_back({box, classId, conf});
+        Detection d;
+        d.box = box;
+        d.classId = faceClass_;
+        d.conf = f[14];
+        d.weak = d.conf < th_.conf;
+        for (int k = 0; k < 5; ++k) d.keypoints.emplace_back(f[4 + 2 * k], f[5 + 2 * k]);
+        result.push_back(std::move(d));
     }
-    return detections;
+    return result;
 }

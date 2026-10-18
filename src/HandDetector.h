@@ -1,27 +1,25 @@
 #pragma once
-#include <opencv2/core.hpp>
 #include <opencv2/dnn.hpp>
 #include <string>
-#include <vector>
 
-#include "Detector.h"
+#include "IDetector.h"
 
-// High-speed hand/palm detection using MediaPipe Palm Detection via OpenCV DNN.
-class HandDetector {
+// Hand detection with MediaPipe's palm detector. The model finds palms; each
+// palm box is extended toward the fingers to cover the whole hand.
+class HandDetector : public IDetector {
 public:
-    HandDetector();
-    explicit HandDetector(const std::string& modelPath, float scoreThresh = 0.5f, float nmsThresh = 0.3f);
-
-    bool load(const std::string& modelPath, float scoreThresh = 0.5f, float nmsThresh = 0.3f);
-    bool isLoaded() const { return !net_.empty(); }
-
-    std::vector<Detection> detect(const cv::Mat& frame, float confThreshold, int classId);
+    HandDetector(const std::string& modelPath, ClassId handClass, DetectorThresholds thresholds);
+    const char* name() const override { return "hand"; }
+    bool canDetect(ClassId id) const override { return id == handClass_; }
+    std::vector<Detection> detect(const cv::Mat& frame) override;
 
 private:
-    static std::vector<cv::Point2f> generateAnchors();
-
     cv::dnn::Net net_;
-    float scoreThresh_ = 0.5f;
-    float nmsThresh_ = 0.3f;
+    ClassId handClass_;
+    DetectorThresholds th_;
     std::vector<cv::Point2f> anchors_;
 };
+
+// Whole-hand box from a palm box and the 7 palm keypoints (wrist first, then the
+// finger bases): the palm is extended from the wrist toward the fingertips.
+cv::Rect2f handBoxFromPalm(const cv::Rect2f& palm, const std::vector<cv::Point2f>& keypoints);

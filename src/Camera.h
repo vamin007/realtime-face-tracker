@@ -10,6 +10,7 @@ public:
     bool openFile(const std::string& path);
     bool read(cv::Mat& frame);
     bool isLive() const { return live_; }
+    double fps();  // the video's frame rate; 30 if unknown
 
 private:
     cv::VideoCapture cap_;

@@ -27,8 +27,7 @@ void drawLabel(cv::Mat& frame, const std::string& text, cv::Point origin, const 
 
 }  // namespace
 
-void drawTracks(cv::Mat& frame, const std::vector<Track>& tracks,
-                const std::vector<std::string>& classNames,
+void drawTracks(cv::Mat& frame, const std::vector<Track>& tracks, const ClassRegistry& classes,
                 bool showTrail) {
     for (const Track& t : tracks) {
         if (!isVisible(t)) continue;
@@ -44,10 +43,8 @@ void drawTracks(cv::Mat& frame, const std::vector<Track>& tracks,
 
         cv::rectangle(frame, t.box, color, 2);
         char label[96];
-        const std::string name = (t.classId >= 0 && t.classId < static_cast<int>(classNames.size()))
-                                     ? classNames[t.classId]
-                                     : "obj";
-        std::snprintf(label, sizeof(label), "%s #%d %.2f", name.c_str(), t.number, t.conf);
+        std::snprintf(label, sizeof(label), "%s #%d %.2f", classes.name(t.classId).c_str(),
+                      t.number, t.conf);
         drawLabel(frame, label, {static_cast<int>(t.box.x), static_cast<int>(t.box.y)}, color);
     }
 }

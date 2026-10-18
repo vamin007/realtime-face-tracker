@@ -27,6 +27,8 @@ ctest --test-dir build           # unit tests (needs googletest)
 ./build/tracker                          # camera 0, all classes
 ./build/tracker --classes person,cup     # only these classes
 ./build/tracker --video clips/hands_face.mov
+./build/tracker --video clips/hands_face.mov --no-window   # headless: just the log and a summary
+./build/tracker --conf-hand 0.5                           # per-detector thresholds: --conf-yolo/-face/-hand
 ./build/tracker --list-classes
 ./build/tracker --help                   # all options
 ```
@@ -42,7 +44,8 @@ It prints the frame rate, the number of IDs per class and how long tracks lasted
 
 ## Layout
 ```
-src/        Camera, Detector (+ FaceDetector, HandDetector), Tracker, Overlay, Logger, main
+src/        Camera; ClassRegistry (all class ids); Detector runs the IDetector implementations
+            (YoloDetector, FaceDetector, HandDetector); Tracker; Overlay; Logger; main
 tests/      GoogleTest unit tests (tracker_tests)
 scripts/    fetch_models.sh, export_yolo.sh, log_stats.py
 models/     coco.names (tracked); *.onnx (downloaded, not in git)

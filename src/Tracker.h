@@ -5,7 +5,7 @@
 #include <opencv2/video/tracking.hpp>
 #include <vector>
 
-#include "Detector.h"
+#include "Detection.h"
 
 struct Track {
     int id;  // unique for the whole run, across all classes (used in logs)

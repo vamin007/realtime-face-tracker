@@ -17,3 +17,8 @@ bool Camera::openFile(const std::string& path) {
 bool Camera::read(cv::Mat& frame) {
     return cap_.read(frame) && !frame.empty();
 }
+
+double Camera::fps() {
+    const double fps = cap_.get(cv::CAP_PROP_FPS);
+    return fps > 0 ? fps : 30.0;
+}

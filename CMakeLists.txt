@@ -15,7 +15,9 @@ find_package(OpenCV REQUIRED)
 # Everything except main(), so the tests link the same code the app runs.
 add_library(tracker_core STATIC
     src/Camera.cpp
+    src/ClassRegistry.cpp
     src/Detector.cpp
+    src/YoloDetector.cpp
     src/FaceDetector.cpp
     src/HandDetector.cpp
     src/Tracker.cpp
@@ -36,9 +38,12 @@ find_package(GTest)
 if(GTest_FOUND)
     enable_testing()
     add_executable(tracker_tests
+        tests/ClassRegistryTest.cpp
+        tests/DetectorTest.cpp
         tests/TrackerTest.cpp
     )
     target_link_libraries(tracker_tests PRIVATE tracker_core GTest::gtest_main)
+    target_compile_definitions(tracker_tests PRIVATE PROJECT_DIR="${CMAKE_SOURCE_DIR}")
     include(GoogleTest)
     gtest_discover_tests(tracker_tests)
 else()

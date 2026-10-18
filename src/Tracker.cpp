@@ -64,7 +64,12 @@ void Tracker::confirm(Track& t) {
     t.number = ++lastNumber_[t.classId];
 }
 
-void Tracker::update(const std::vector<Detection>& detections) {
+void Tracker::update(const std::vector<Detection>& allDetections) {
+    // Weak (low-confidence) detections are ignored by this tracker.
+    std::vector<Detection> detections;
+    for (const Detection& d : allDetections)
+        if (!d.weak) detections.push_back(d);
+
     // 1. Predict where every existing track should be now.
     for (Track& t : tracks_) t.box = toRect(t.kf.predict());
 

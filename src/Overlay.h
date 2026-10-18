@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include "ClassRegistry.h"
 #include "Tracker.h"
 
 struct HudInfo {
@@ -11,8 +12,7 @@ struct HudInfo {
     int visibleTracks;
 };
 
-void drawTracks(cv::Mat& frame, const std::vector<Track>& tracks,
-                const std::vector<std::string>& classNames,
+void drawTracks(cv::Mat& frame, const std::vector<Track>& tracks, const ClassRegistry& classes,
                 bool showTrail = false);
 void drawHud(cv::Mat& frame, const HudInfo& info);
 

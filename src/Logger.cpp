@@ -21,14 +21,14 @@ Logger::Logger(const std::string& logDir) {
 }
 
 void Logger::log(long long frameIndex, const std::vector<Track>& tracks,
-                 const std::vector<std::string>& classNames) {
+                 const ClassRegistry& classes) {
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::system_clock::now().time_since_epoch())
                         .count();
     for (const Track& t : tracks) {
         if (!isVisible(t)) continue;
         out_ << ms << ',' << frameIndex << ',' << t.id << ',' << t.number << ','
-             << classNames[t.classId] << ','
+             << classes.name(t.classId) << ','
              << static_cast<int>(t.box.x) << ',' << static_cast<int>(t.box.y) << ','
              << static_cast<int>(t.box.width) << ',' << static_cast<int>(t.box.height) << ','
              << t.conf << '\n';
