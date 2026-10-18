@@ -26,6 +26,11 @@ add_library(tracker_core STATIC
     src/KalmanBox.cpp
     src/Tracker.cpp
     src/Targeting.cpp
+    src/Embedder.cpp
+    src/Labels.cpp
+    src/Recognizer.cpp
+    src/Enrollment.cpp
+    src/Options.cpp
     src/Overlay.cpp
     src/Logger.cpp
 )
@@ -51,7 +56,10 @@ if(GTest_FOUND)
         tests/AssignmentTest.cpp
         tests/ClassRegistryTest.cpp
         tests/DetectorTest.cpp
+        tests/EmbedderTest.cpp
         tests/KalmanBoxTest.cpp
+        tests/LabelsTest.cpp
+        tests/OptionsTest.cpp
         tests/OrtModelTest.cpp
         tests/TargetingTest.cpp
         tests/TrackerTest.cpp

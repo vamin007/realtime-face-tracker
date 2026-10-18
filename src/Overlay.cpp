@@ -38,7 +38,7 @@ void drawLabel(cv::Mat& frame, const std::string& text, cv::Point origin, const 
 }  // namespace
 
 void drawTracks(cv::Mat& frame, const std::vector<Track>& tracks, const ClassRegistry& classes,
-                bool showTrail, int targetId) {
+                bool showTrail, int targetId, const Recognizer* recognizer) {
     for (const Track& t : tracks) {
         if (!isVisible(t) || t.id == targetId) continue;
         const cv::Scalar color = colorForId(t.id);
@@ -50,8 +50,12 @@ void drawTracks(cv::Mat& frame, const std::vector<Track>& tracks, const ClassReg
         }
         cv::rectangle(frame, t.box, color, 2);
         char label[96];
-        std::snprintf(label, sizeof(label), "%s #%d %.2f", classes.name(t.classId).c_str(),
-                      t.number, t.conf);
+        // A custom label is one specific item, so it needs no number.
+        const std::string* custom = recognizer ? recognizer->labelName(t.id) : nullptr;
+        if (custom) std::snprintf(label, sizeof(label), "%s %.2f", custom->c_str(), t.conf);
+        else
+            std::snprintf(label, sizeof(label), "%s #%d %.2f", classes.name(t.classId).c_str(),
+                          t.number, t.conf);
         drawLabel(frame, label, {static_cast<int>(t.box.x), static_cast<int>(t.box.y)}, color);
     }
 }

@@ -1,4 +1,6 @@
+#include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -17,93 +19,24 @@
 #include "Camera.h"
 #include "ClassRegistry.h"
 #include "Detector.h"
+#include "Enrollment.h"
 #include "FaceDetector.h"
 #include "HandDetector.h"
+#include "Labels.h"
 #include "Logger.h"
+#include "Options.h"
 #include "Overlay.h"
+#include "Recognizer.h"
+#include "Targeting.h"
 #include "Tracker.h"
 #include "YoloDetector.h"
 
+namespace fs = std::filesystem;
+
 namespace {
 
-const std::string kModels = std::string(PROJECT_DIR) + "/models/";
-
-struct ModelPath {
-    std::string path;
-    bool explicitlySet = false;  // given with a flag: failing to load it is an error
-};
-
-struct Options {
-    std::string classes;  // comma-separated, empty = all
-    float confYolo = 0.4f;
-    float confFace = 0.6f;
-    float confHand = 0.6f;
-    int camera = 0;
-    std::string video;      // play a file instead of the camera
-    bool realtime = false;  // play the video at its own speed, skipping frames when busy
-    Backend backend = Backend::CoreML;
-    // 640x384 fits a 16:9 frame with little padding; the square model is the fallback.
-    ModelPath yoloModel{kModels + "yolov8n_384x640.onnx"};
-    ModelPath faceModel{kModels + "face_detection_yunet_2023mar.onnx"};
-    ModelPath handModel{kModels + "palm_detection_mediapipe_2023feb.onnx"};
-    std::string names = kModels + "coco.names";
-    std::string logDir = std::string(PROJECT_DIR) + "/logs";
-    std::string cacheDir = std::string(PROJECT_DIR) + "/.cache/coreml";
-    bool log = true;
-    bool mirror = true;
-    bool faces = true;
-    bool hands = true;
-    bool showTrail = false;
-    bool window = true;
-    bool listClasses = false;
-    bool targeting = true;
-    TargetParams target;
-    // Developer options
-    long long maxFrames = 0;     // stop after this many frames; 0 = no limit
-    std::string dumpDetections;  // CSV of every raw detection per frame
-    std::string saveFrames;      // directory for annotated snapshots
-    int saveEvery = 30;
-    std::string dumpLight;  // CSV of each face's brightness per frame
-    bool parallel = true;   // run the detectors side by side
-    int faceWidth = 640;    // face detection works on frames scaled down to this width
-};
-
-void printUsage() {
-    std::cout
-        << "Usage: tracker [options]\n"
-           "  --classes a,b,c     only track these classes (e.g. person,hand,face,cup)\n"
-           "  --list-classes      print the classes it knows and exit\n"
-           "  --conf N            confidence threshold for all detectors, 0..1\n"
-           "  --conf-yolo N       objects (default 0.4)\n"
-           "  --conf-face N       faces (default 0.6)\n"
-           "  --conf-hand N       hands (default 0.6)\n"
-           "  --no-faces          turn off face detection\n"
-           "  --no-hands          turn off hand detection\n"
-           "  --no-targeting      don't mark a brightly lit face as TARGET\n"
-           "  --target-ratio N    a lit face is N times as bright as the room (default 1.0)\n"
-           "  --target-rise N     ... and N times brighter than it normally is (default 1.35)\n"
-           "  --camera N          camera index (default 0)\n"
-           "  --video PATH        read a video file instead of the camera\n"
-           "  --realtime          play the video at its own speed, like a camera\n"
-           "  --no-window         don't show a window (video files only)\n"
-           "  --no-mirror         don't flip the camera image horizontally\n"
-           "  --show-trail        draw a motion trail behind each track\n"
-           "  --no-log            don't write a CSV log\n"
-           "  --backend B         coreml (GPU / Neural Engine, default) or cpu\n"
-           "  --model PATH        YOLO model (default models/yolov8n_384x640.onnx)\n"
-           "  --face-model PATH   face model (default models/face_detection_yunet_2023mar.onnx)\n"
-           "  --hand-model PATH   hand model (default "
-           "models/palm_detection_mediapipe_2023feb.onnx)\n"
-           "Developer options:\n"
-           "  --max-frames N            stop after N frames\n"
-           "  --dump-detections PATH    write every raw detection to a CSV\n"
-           "  --save-frames DIR         save annotated frames as JPEGs\n"
-           "  --save-every N            with --save-frames: every Nth frame (default 30)\n"
-           "  --sequential              run the detectors one after another\n"
-           "  --face-width N            width faces are detected at (default 640, 0 = full)\n"
-           "  --dump-light PATH         write each face's brightness per frame to a CSV\n"
-           "Keys: Esc or q to quit.\n";
-}
+std::atomic<bool> gStop{false};  // set by Ctrl-C; the loop ends cleanly and the log is complete
+void onInterrupt(int) { gStop = true; }
 
 std::string trim(const std::string& s) {
     const auto first = s.find_first_not_of(" \t");
@@ -111,105 +44,43 @@ std::string trim(const std::string& s) {
     return s.substr(first, s.find_last_not_of(" \t") - first + 1);
 }
 
-float parseFloat(const std::string& flag, const std::string& text, float lo, float hi) {
-    size_t used = 0;
-    float value = 0;
-    try {
-        value = std::stof(text, &used);
-    } catch (const std::exception&) {
-        used = 0;
-    }
-    if (used == 0 || used != text.size() || value < lo || value > hi) {
-        std::ostringstream msg;
-        msg << flag << " expects a number from " << lo << " to " << hi << ", got '" << text << "'";
-        throw std::runtime_error(msg.str());
-    }
-    return value;
-}
+// What --classes asked for.
+struct ClassFilter {
+    std::set<ClassId> detect;     // classes to detect; empty = all
+    std::set<ClassId> labelOnly;  // base classes requested only through a label
+    std::set<int> labels;         // requested labels (indices into the library)
 
-long long parseInt(const std::string& flag, const std::string& text, long long lo, long long hi) {
-    size_t used = 0;
-    long long value = 0;
-    try {
-        value = std::stoll(text, &used);
-    } catch (const std::exception&) {
-        used = 0;
+    // Asking for "my_mug" detects cups but shows only the cup recognized as my_mug.
+    bool shows(const Track& t, const ClassRegistry& classes, const Recognizer* recognizer) const {
+        if (!labelOnly.count(classes.base(t.classId))) return true;
+        const int label = recognizer ? recognizer->labelOf(t.id) : -1;
+        return label >= 0 && labels.count(label);
     }
-    if (used == 0 || used != text.size() || value < lo || value > hi) {
-        std::ostringstream msg;
-        msg << flag << " expects a whole number from " << lo << " to " << hi << ", got '" << text
-            << "'";
-        throw std::runtime_error(msg.str());
-    }
-    return value;
-}
+};
 
-// Returns false when the program should exit right away (e.g. after --help).
-bool parseArgs(int argc, char** argv, Options& opt) {
-    for (int i = 1; i < argc; ++i) {
-        const std::string arg = argv[i];
-        auto next = [&]() -> std::string {
-            if (i + 1 >= argc) throw std::runtime_error("Missing value for " + arg);
-            return argv[++i];
-        };
-        if (arg == "--classes") opt.classes = next();
-        else if (arg == "--list-classes") opt.listClasses = true;
-        else if (arg == "--conf")
-            opt.confYolo = opt.confFace = opt.confHand = parseFloat(arg, next(), 0, 1);
-        else if (arg == "--conf-yolo") opt.confYolo = parseFloat(arg, next(), 0, 1);
-        else if (arg == "--conf-face") opt.confFace = parseFloat(arg, next(), 0, 1);
-        else if (arg == "--conf-hand") opt.confHand = parseFloat(arg, next(), 0, 1);
-        else if (arg == "--no-faces") opt.faces = false;
-        else if (arg == "--no-hands") opt.hands = false;
-        else if (arg == "--no-targeting") opt.targeting = false;
-        else if (arg == "--target-ratio") opt.target.minRatio = parseFloat(arg, next(), 0.5f, 100);
-        else if (arg == "--target-rise") opt.target.minRise = parseFloat(arg, next(), 1, 100);
-        else if (arg == "--dump-light") opt.dumpLight = next();
-        else if (arg == "--camera") opt.camera = static_cast<int>(parseInt(arg, next(), 0, 99));
-        else if (arg == "--video") opt.video = next();
-        else if (arg == "--realtime") opt.realtime = true;
-        else if (arg == "--backend") {
-            const std::string b = next();
-            if (b == "coreml") opt.backend = Backend::CoreML;
-            else if (b == "cpu") opt.backend = Backend::Cpu;
-            else throw std::runtime_error("--backend expects coreml or cpu, got '" + b + "'");
-        } else if (arg == "--no-window") opt.window = false;
-        else if (arg == "--no-mirror") opt.mirror = false;
-        else if (arg == "--show-trail") opt.showTrail = true;
-        else if (arg == "--no-log") opt.log = false;
-        else if (arg == "--model") opt.yoloModel = {next(), true};
-        else if (arg == "--face-model") opt.faceModel = {next(), true};
-        else if (arg == "--hand-model") opt.handModel = {next(), true};
-        else if (arg == "--max-frames") opt.maxFrames = parseInt(arg, next(), 1, 100000000);
-        else if (arg == "--dump-detections") opt.dumpDetections = next();
-        else if (arg == "--save-frames") opt.saveFrames = next();
-        else if (arg == "--save-every")
-            opt.saveEvery = static_cast<int>(parseInt(arg, next(), 1, 100000));
-        else if (arg == "--sequential") opt.parallel = false;
-        else if (arg == "--face-width")
-            opt.faceWidth = static_cast<int>(parseInt(arg, next(), 0, 10000));
-        else if (arg == "--help" || arg == "-h") {
-            printUsage();
-            return false;
-        } else throw std::runtime_error("Unknown option: " + arg + " (see --help)");
-    }
-    if (!opt.window && opt.video.empty() && opt.maxFrames == 0)
-        throw std::runtime_error(
-            "--no-window needs --video or --max-frames (nothing could stop it)");
-    return true;
-}
-
-std::set<ClassId> resolveClasses(const std::string& csv, const ClassRegistry& classes) {
-    std::set<ClassId> ids;
+ClassFilter resolveClasses(const std::string& csv, const ClassRegistry& classes,
+                           const LabelLibrary& library) {
+    ClassFilter filter;
+    std::set<ClassId> explicitClasses;
     std::stringstream ss(csv);
     for (std::string name; std::getline(ss, name, ',');) {
         name = trim(name);
         if (name.empty()) continue;
         const ClassId id = classes.find(name);
-        if (id < 0) throw std::runtime_error("Unknown class '" + name + "' (see --list-classes)");
-        ids.insert(id);
+        if (id < 0)
+            throw std::runtime_error("Unknown class or label '" + name +
+                                     "' (see --list-classes and --list-labels)");
+        if (classes.kind(id) == ClassKind::Custom) {
+            filter.detect.insert(classes.base(id));
+            filter.labelOnly.insert(classes.base(id));
+            filter.labels.insert(library.find(name));
+        } else {
+            filter.detect.insert(id);
+            explicitClasses.insert(id);
+        }
     }
-    return ids;
+    for (ClassId id : explicitClasses) filter.labelOnly.erase(id);
+    return filter;
 }
 
 // Adds one detector. A model given with a flag must load; a default one that
@@ -222,6 +93,65 @@ void addDetector(Detector& detector, const ModelPath& model, Make make) {
         if (model.explicitlySet) throw;
         std::cerr << "Warning: " << e.what() << " (detector disabled)\n";
     }
+}
+
+void buildDetectors(Detector& detector, const Options& opt, const ClassRegistry& classes) {
+    detector.setParallel(opt.parallel);
+    addDetector(detector, opt.yoloModel, [&] {
+        return std::make_unique<YoloDetector>(opt.yoloModel.path, classes.cocoCount(),
+                                              DetectorThresholds{opt.confYolo}, opt.backend,
+                                              opt.cacheDir);
+    });
+    if (opt.faces)
+        addDetector(detector, opt.faceModel, [&] {
+            return std::make_unique<FaceDetector>(opt.faceModel.path, classes.face(),
+                                                  DetectorThresholds{opt.confFace, 0.1f, 0.3f},
+                                                  opt.faceWidth);
+        });
+    if (opt.hands)
+        addDetector(detector, opt.handModel, [&] {
+            return std::make_unique<HandDetector>(opt.handModel.path, classes.hand(),
+                                                  DetectorThresholds{opt.confHand, 0.1f, 0.3f},
+                                                  opt.backend, opt.cacheDir);
+        });
+    if (detector.empty()) throw std::runtime_error("No detector could be loaded");
+}
+
+// Makes each saved label a class (so --classes and the overlay know its name).
+void registerLabels(const LabelLibrary& library, ClassRegistry& classes) {
+    for (const CustomLabel& label : library.labels()) {
+        const ClassId base = classes.find(label.baseClass);
+        if (base < 0 || classes.kind(base) == ClassKind::Custom) {
+            std::cerr << "Warning: label " << label.name << " refines unknown class "
+                      << label.baseClass << "; ignored\n";
+            continue;
+        }
+        try {
+            classes.addCustom(label.name, base);
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: label " << label.name << ": " << e.what() << '\n';
+        }
+    }
+}
+
+void listLabels(const LabelLibrary& library) {
+    if (library.labels().empty()) {
+        std::cout << "No labels in " << library.dir() << " (add one with --enroll)\n";
+        return;
+    }
+    for (const CustomLabel& label : library.labels())
+        std::cout << label.name << "  (" << label.baseClass << ", " << label.samples.size() / 2
+                  << " photos)\n";
+}
+
+void removeLabel(const std::string& name, const LabelLibrary& library) {
+    const int index = library.find(name);
+    if (index < 0) throw std::runtime_error("No label named '" + name + "' (see --list-labels)");
+    const size_t photos = library.labels()[index].samples.size() / 2;
+    const std::string folder = library.folder(name);
+    fs::remove_all(folder);
+    std::cout << "Removed label " << name << " and its " << photos << " photo(s) in " << folder
+              << '\n';
 }
 
 void dumpDetections(std::ofstream& out, long long frame, double tMs,
@@ -254,42 +184,52 @@ void dumpLight(std::ofstream& out, long long frame, double tMs, const TargetSele
 int main(int argc, char** argv) try {
     // OpenCV's DNN module prints a warning about compute targets on every launch.
     cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_ERROR);
-    Options opt;
-    if (!parseArgs(argc, argv, opt)) return 0;
+    Options opt = defaultOptions(PROJECT_DIR);
+    if (!parseArgs(std::vector<std::string>(argv + 1, argv + argc), opt)) return 0;
 
     ClassRegistry classes = ClassRegistry::fromFile(opt.names);
+    LabelLibrary library(opt.labelsDir);
+    library.load();
+    registerLabels(library, classes);
+
     if (opt.listClasses) {
         for (ClassId id = 0; id < classes.size(); ++id) std::cout << classes.name(id) << '\n';
         return 0;
     }
-    const std::set<ClassId> allowed = resolveClasses(opt.classes, classes);
+    if (opt.listLabels) {
+        listLabels(library);
+        return 0;
+    }
+    if (!opt.removeLabel.empty()) {
+        removeLabel(opt.removeLabel, library);
+        return 0;
+    }
 
     // Fall back to the square YOLO model if the 16:9 one hasn't been exported.
-    if (!opt.yoloModel.explicitlySet && !std::filesystem::exists(opt.yoloModel.path))
-        opt.yoloModel.path = kModels + "yolov8n.onnx";
+    if (!opt.yoloModel.explicitlySet && !fs::exists(opt.yoloModel.path))
+        opt.yoloModel.path = fs::path(opt.yoloModel.path).parent_path() / "yolov8n.onnx";
 
     Detector detector;
-    detector.setParallel(opt.parallel);
-    addDetector(detector, opt.yoloModel, [&] {
-        return std::make_unique<YoloDetector>(opt.yoloModel.path, classes.cocoCount(),
-                                              DetectorThresholds{opt.confYolo}, opt.backend,
-                                              opt.cacheDir);
-    });
-    if (opt.faces)
-        addDetector(detector, opt.faceModel, [&] {
-            return std::make_unique<FaceDetector>(opt.faceModel.path, classes.face(),
-                                                  DetectorThresholds{opt.confFace, 0.1f, 0.3f},
-                                                  opt.faceWidth);
-        });
-    if (opt.hands)
-        addDetector(detector, opt.handModel, [&] {
-            return std::make_unique<HandDetector>(opt.handModel.path, classes.hand(),
-                                                  DetectorThresholds{opt.confHand, 0.1f, 0.3f},
-                                                  opt.backend, opt.cacheDir);
-        });
-    if (detector.empty()) throw std::runtime_error("No detector could be loaded");
+    buildDetectors(detector, opt, classes);
+    Embedders embedders(opt.faceIdModel.path, opt.objectIdModel.path, opt.backend, opt.cacheDir);
+    if (!opt.enrollName.empty()) {
+        enroll(opt.enrollName, opt.enrollClass, opt.enrollPhotos, opt.wholePhoto, detector, classes,
+               embedders, library);
+        return 0;
+    }
+
     std::cout << "Detectors (" << (opt.parallel ? "side by side" : "one after another") << "):\n";
     for (const std::string& line : detector.summary()) std::cout << "  " << line << '\n';
+    const ClassFilter filter = resolveClasses(opt.classes, classes, library);
+
+    std::unique_ptr<Recognizer> recognizer;
+    if (opt.labels && !library.labels().empty()) {
+        recognizer = std::make_unique<Recognizer>(library, classes, embedders);
+        std::cout << "Labels:";
+        for (const CustomLabel& label : library.labels())
+            std::cout << ' ' << label.name << " (" << label.baseClass << ")";
+        std::cout << '\n';
+    }
 
     Camera camera;
     const bool opened = opt.video.empty() ? camera.openDevice(opt.camera, 1280, 720)
@@ -309,25 +249,32 @@ int main(int argc, char** argv) try {
         logger = std::make_unique<Logger>(opt.logDir);
         std::cout << "Logging to " << logger->path() << '\n';
     }
-    std::ofstream dump;
+    std::ofstream dump, lightDump;
     if (!opt.dumpDetections.empty()) {
         dump.open(opt.dumpDetections);
         if (!dump) throw std::runtime_error("Failed to open " + opt.dumpDetections);
         dump << "frame,t_ms,class,conf,weak,x,y,w,h,keypoints\n";
     }
-    if (!opt.saveFrames.empty()) std::filesystem::create_directories(opt.saveFrames);
-
-    Tracker tracker(classes);
-    tracker.setFrameSize(camera.frameSize());
-    TargetSelector targeting(classes, opt.target);
-    std::ofstream lightDump;
     if (!opt.dumpLight.empty()) {
         lightDump.open(opt.dumpLight);
         if (!lightDump) throw std::runtime_error("Failed to open " + opt.dumpLight);
         lightDump << "frame,t_ms,id,face_luma,background,ratio,normal,rise,lit,target\n";
     }
+    std::ofstream labelDump;
+    if (!opt.dumpLabels.empty() && recognizer) {
+        labelDump.open(opt.dumpLabels);
+        if (!labelDump) throw std::runtime_error("Failed to open " + opt.dumpLabels);
+        labelDump << "t,track,class,best_label,score,runner_up,match,assigned\n";
+        recognizer->setDebugStream(&labelDump);
+    }
+    if (!opt.saveFrames.empty()) fs::create_directories(opt.saveFrames);
+
+    Tracker tracker(classes);
+    tracker.setFrameSize(camera.frameSize());
+    TargetSelector targeting(classes, opt.target);
     const std::string window = "Object Tracker";
     if (opt.window) cv::namedWindow(window, cv::WINDOW_NORMAL);
+    std::signal(SIGINT, onInterrupt);
 
     using Clock = std::chrono::steady_clock;
     const auto start = Clock::now();
@@ -336,26 +283,39 @@ int main(int argc, char** argv) try {
     long long frameIndex = 0;
     cv::Mat frame;
     double tMs = 0;
+    bool showTrail = opt.showTrail;
     // Running totals for the summary at the end.
     double detectMsTotal = 0;
     std::map<std::string, double> detectorMsTotal;
+    std::vector<Track> filtered;
 
-    while ((opt.maxFrames == 0 || frameIndex < opt.maxFrames) && camera.read(frame, tMs)) {
+    while (!gStop && (opt.maxFrames == 0 || frameIndex < opt.maxFrames) &&
+           camera.read(frame, tMs)) {
         if (opt.mirror && camera.isLive()) cv::flip(frame, frame, 1);
 
         const auto t0 = Clock::now();
-        const auto detections = detector.detect(frame, allowed);
+        const auto detections = detector.detect(frame, filter.detect);
         detectMsTotal += std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
         for (const auto& t : detector.timings()) detectorMsTotal[t.name] += t.ms;
         if (dump.is_open()) dumpDetections(dump, frameIndex, tMs, detections, classes);
 
         tracker.update(detections, tMs / 1000.0);
-        // Brightness is measured here, before anything is drawn on the frame.
+        // Recognition copies crops and targeting measures brightness: both happen
+        // before anything is drawn on the frame.
+        if (recognizer) recognizer->update(frame, tracker.tracks(), tMs / 1000.0);
         if (opt.targeting) targeting.update(frame, tracker.tracks(), tMs / 1000.0);
         if (lightDump.is_open()) dumpLight(lightDump, frameIndex, tMs, targeting);
+
+        const std::vector<Track>* shown = &tracker.tracks();
+        if (!filter.labelOnly.empty()) {
+            filtered.clear();
+            for (const Track& t : tracker.tracks())
+                if (filter.shows(t, classes, recognizer.get())) filtered.push_back(t);
+            shown = &filtered;
+        }
         if (logger)
-            logger->log(frameIndex, tMs, tracker.tracks(), classes,
-                        opt.targeting ? &targeting : nullptr);
+            logger->log(frameIndex, tMs, *shown, classes, opt.targeting ? &targeting : nullptr,
+                        recognizer.get());
 
         // Smoothed FPS so the number doesn't flicker.
         const auto now = Clock::now();
@@ -364,9 +324,8 @@ int main(int argc, char** argv) try {
         fps = fps == 0.0 ? instant : 0.9 * fps + 0.1 * instant;
 
         int visible = 0;
-        for (const Track& t : tracker.tracks()) visible += isVisible(t);
-
-        drawTracks(frame, tracker.tracks(), classes, opt.showTrail, targeting.target().trackId);
+        for (const Track& t : *shown) visible += isVisible(t);
+        drawTracks(frame, *shown, classes, showTrail, targeting.target().trackId, recognizer.get());
         drawTarget(frame, targeting.target());
         drawHud(frame, {fps, detector.timings(), visible});
         if (!opt.saveFrames.empty() && frameIndex % opt.saveEvery == 0) {
@@ -376,7 +335,12 @@ int main(int argc, char** argv) try {
         }
         if (opt.window) {
             cv::imshow(window, frame);
-            const int key = cv::waitKey(1);
+            int key = cv::waitKey(1);
+            if (key == 'p') {  // pause: keep this frame on screen until p again
+                do key = cv::waitKey(50);
+                while (key != 'p' && key != 'q' && key != 27 && !gStop);
+            }
+            if (key == 't') showTrail = !showTrail;
             if (key == 27 || key == 'q') break;
         }
         ++frameIndex;

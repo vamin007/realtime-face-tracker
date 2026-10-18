@@ -182,6 +182,21 @@ struct TargetState { int trackUid = -1; double conditionSince = 0, releaseSince 
 ```
 
 ### M5: Custom labels
+**Done 2026-10-17.** Tested with frames from the clips as photos (kept outside the project):
+
+| Label | Photos from | Recognized in `flashlight.mov` |
+|---|---|---|
+| `me` (face, SFace) | `hands_face.mov` | 99% of frames. Every check matched (0.51–0.87 vs 0.36 needed). |
+| `my_phone` (cell phone, DINOv2) | `flashlight.mov`, 3 usable photos | 75% of frames: every phone track matched at 0.62–0.91. The rest is the first second of each track, while it gathers 3 matching checks. |
+
+Measured and changed from the plan:
+- DINOv2 summary token vs. the average of its patch tokens: on 405 phone crops vs. other objects, patch averaging with a tight crop separated them best. Same phone: 0.77 typical, 0.57 at the 10th percentile. Other objects: 0.29 typical, 0.57 at the 90th. AUC 0.965, against 0.937 for the summary token. Threshold 0.6.
+- DINOv2 runs on the CPU (84 ms per crop on the recognition thread). CoreML ran it in 8 ms but took 8–38 s to load on every launch. With the original choice, enrolling 5 photos took 46 s; it now takes 2 s.
+- Enrollment skips photos where the item isn't found (`--whole-photo` for close-ups), and picks the face rather than the whole `person` when the photos show a face.
+- Unlabeled tracks are checked every 0.25 s and labeled ones every 1 s. 4 misses in a row take a label away.
+- Not tested: telling two different items of the same class apart (the clips have one phone and one person). The 0.6 threshold sits above 90% of other-object scores. Identical products can't be told apart from pictures.
+
+Original plan:
 - **Concept: embeddings.** A neural network turns an image crop into a vector, and crops of the same item produce vectors pointing in nearly the same direction. Cosine similarity measures that, and several photos give several vectors, which covers more angles and lighting.
   - **Faces:** SFace (OpenCV's `FaceRecognizerSF`, `face_recognition_sface_2021dec.onnx`), aligned using YuNet's landmarks. It's built for telling faces apart.
   - **Objects:** DINOv2-small (pre-exported ONNX, run on ONNX Runtime with CoreML), which is strong at recognizing specific instances.

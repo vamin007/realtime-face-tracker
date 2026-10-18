@@ -49,6 +49,25 @@ At startup it prints where each detector runs. CoreML compiles a model on first 
 keeps the result in `.cache/coreml/`. A model runs on CoreML only if CoreML can take all of it; otherwise
 it runs on the CPU, which was faster for the partly supported palm model.
 
+## Custom labels
+Teach it a specific item, such as your mug or a person's face, from a few photos:
+```sh
+./build/tracker --enroll my_mug mug1.jpg mug2.jpg mug3.jpg mug4.jpg mug5.jpg
+./build/tracker --enroll alex alex1.jpg alex2.jpg alex3.jpg       # a face: it finds the face itself
+./build/tracker --list-labels
+./build/tracker --classes my_mug          # detect cups, show only the one that is my_mug
+./build/tracker --remove-label my_mug     # deletes the label and its copied photos
+```
+- It finds the item in each photo with the normal detectors (add `--class cup` to say what it is). It copies the photos to `labels/<name>/` and stores a neural-network *embedding* of each, plus a mirrored copy, in `label.yml`.
+- Embeddings come from SFace for faces and DINOv2 for objects. Enrolling the same name again adds photos.
+- Photos where the item can't be found are skipped. For close-ups that show only the item, use `--whole-photo`.
+- **5–10 photos from different angles and in different light work best.** Enrollment reports how well the photos agree with each other and points out any that don't fit.
+- While tracking, objects of a labeled class are checked in the background a few times a second. A track takes the label after 3 matching checks, and each label is one item, so at most one track has it.
+- Labeled tracks show the label instead of `class #n`. A face under a bright light still shows `TARGET`.
+- `labels/` holds your photos and isn't committed to git.
+
+Telling *a* mug from *your* mug works when the photos cover the angles you'll show it from. Two identical products (two of the same phone) can't be told apart from pictures alone.
+
 ## Logs
 Each run writes `logs/run_<date>_<time>.csv`. To summarize one or more runs:
 ```sh
@@ -67,7 +86,8 @@ To tune the tracker without re-running the neural networks, save a clip's detect
 src/        Camera (capture thread); ClassRegistry (all class ids); Detector runs the IDetector
             implementations (YoloDetector, FaceDetector, HandDetector) side by side; OrtModel
             (ONNX Runtime + CoreML); Tracker (+ KalmanBox, Assignment); Targeting (TARGET);
-            Overlay; Logger; main
+            Embedder, Labels, Enrollment, Recognizer (custom labels); Options; Overlay; Logger; main
+labels/     custom labels: photos + label.yml per label (not in git)
 tools/      replay.cpp: the tracker on saved detections (tracker_replay)
 tests/      GoogleTest unit tests (tracker_tests)
 scripts/    fetch_models.sh, export_yolo.sh, log_stats.py
