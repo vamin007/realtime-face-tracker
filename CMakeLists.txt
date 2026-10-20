@@ -49,6 +49,11 @@ add_executable(tracker_replay tools/replay.cpp)
 target_link_libraries(tracker_replay PRIVATE tracker_core)
 target_compile_definitions(tracker_replay PRIVATE PROJECT_DIR="${CMAKE_SOURCE_DIR}")
 
+# Developer tool: saves video frames as photos, for trying custom labels (see tools/grab_frames.cpp).
+add_executable(grab_frames tools/grab_frames.cpp)
+target_link_libraries(grab_frames PRIVATE tracker_core)
+target_compile_definitions(grab_frames PRIVATE PROJECT_DIR="${CMAKE_SOURCE_DIR}")
+
 # Unit tests: build with the rest, run with `ctest --test-dir build`.
 find_package(GTest)
 if(GTest_FOUND)
@@ -60,6 +65,7 @@ if(GTest_FOUND)
         tests/EmbedderTest.cpp
         tests/KalmanBoxTest.cpp
         tests/LabelsTest.cpp
+        tests/LabelSyncTest.cpp
         tests/OptionsTest.cpp
         tests/OrtModelTest.cpp
         tests/OverlayTest.cpp

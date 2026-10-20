@@ -1,0 +1,346 @@
+// Label folders end to end: syncing, enrolling, renaming, removing and
+// converting old labels, with stand-in models so the tests run in milliseconds.
+
+#include <gtest/gtest.h>
+
+#include <filesystem>
+#include <fstream>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
+
+#include "Enrollment.h"
+
+namespace fs = std::filesystem;
+
+namespace {
+
+// Finds the red rectangle in a test photo and calls it a cup.
+class RedCupDetector : public IDetector {
+public:
+    explicit RedCupDetector(ClassId cup) : cup_(cup) {}
+    const char* name() const override { return "red"; }
+    bool canDetect(ClassId id) const override { return id == cup_; }
+    std::vector<Detection> detect(const cv::Mat& frame) override {
+        cv::Mat mask;
+        cv::inRange(frame, cv::Scalar(0, 0, 200), cv::Scalar(60, 60, 255), mask);
+        int left = mask.cols, top = mask.rows, right = -1, bottom = -1;
+        for (int y = 0; y < mask.rows; ++y)
+            for (int x = 0; x < mask.cols; ++x)
+                if (mask.at<uchar>(y, x)) {
+                    left = std::min(left, x), right = std::max(right, x);
+                    top = std::min(top, y), bottom = std::max(bottom, y);
+                }
+        if (right < 0) return {};
+        Detection d;
+        d.box = cv::Rect2f(left, top, right - left + 1, bottom - top + 1);
+        d.classId = cup_;
+        d.conf = 0.9f;
+        return {d};
+    }
+
+private:
+    ClassId cup_;
+};
+
+// Embeds a crop as its mean color, and counts how often it was asked.
+class ColorEmbedder : public IEmbedder {
+public:
+    std::string modelId() const override { return "test-color"; }
+    float defaultThreshold() const override { return 0.9f; }
+    Embedding embed(const cv::Mat& frame, const cv::Rect2f& box,
+                    const std::vector<cv::Point2f>&) override {
+        ++calls;
+        const cv::Rect roi = cv::Rect(box) & cv::Rect(0, 0, frame.cols, frame.rows);
+        if (roi.area() <= 0) return {};
+        const cv::Scalar m = cv::mean(frame(roi));
+        Embedding e{static_cast<float>(m[0] + 1), static_cast<float>(m[1] + 1),
+                    static_cast<float>(m[2] + 1)};
+        const float n = std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+        for (float& x : e) x /= n;
+        return e;
+    }
+    int calls = 0;
+};
+
+class TestEmbedders : public Embedders {
+public:
+    TestEmbedders() : Embedders("", "", Backend::Cpu, "") {}
+    IEmbedder& forKind(ClassKind) override { return embedder; }
+    std::string modelId(ClassKind) const override { return "test-color"; }
+    float defaultThreshold(ClassKind) const override { return 0.9f; }
+    ColorEmbedder embedder;
+};
+
+class LabelSync : public testing::Test {
+protected:
+    void SetUp() override {
+        root = fs::path(testing::TempDir()) / "label_sync";
+        fs::remove_all(root);
+        dir = (root / "labels").string();
+        fs::create_directories(dir);
+        detector.setParallel(false);
+        detector.add(std::make_unique<RedCupDetector>(classes.find("cup")));
+    }
+    void TearDown() override { fs::remove_all(root); }
+
+    // A gray photo with a red cup at x (or none if x < 0).
+    static void photo(const fs::path& path, int x, cv::Scalar background = {128, 128, 128}) {
+        fs::create_directories(path.parent_path());
+        cv::Mat image(120, 160, CV_8UC3, background);
+        if (x >= 0) cv::rectangle(image, {x, 30, 40, 50}, {20, 20, 230}, cv::FILLED);
+        cv::imwrite(path.string(), image);
+    }
+
+    int sync(LabelLibrary& library) {
+        return syncLabels(library, detector, classes, embedders, false);
+    }
+
+    fs::path root;
+    std::string dir;
+    ClassRegistry classes{{"person", "cup", "bottle"}};
+    Detector detector;
+    TestEmbedders embedders;
+};
+
+}  // namespace
+
+TEST_F(LabelSync, NewFolderBecomesALabelAndUnchangedPhotosAreNotLookedAtAgain) {
+    photo(fs::path(dir) / "mug" / "a.png", 10);
+    photo(fs::path(dir) / "mug" / "b.png", 60);
+    photo(fs::path(dir) / "mug" / "c.png", 100);
+    photo(fs::path(dir) / "mug" / "no_cup.png", -1, {200, 100, 0});
+    LabelLibrary library(dir);
+    library.load();
+    EXPECT_TRUE(library.needsSync());
+    EXPECT_EQ(sync(library), 1);
+
+    ASSERT_EQ(library.labels().size(), 1u);
+    const CustomLabel& label = library.labels()[0];
+    EXPECT_EQ(label.name, "mug");
+    EXPECT_EQ(label.baseClass, "cup");      // chosen from the photos
+    EXPECT_EQ(label.samples.size(), 6u);    // 3 usable photos, each also mirrored
+    EXPECT_EQ(embedders.embedder.calls, 6);
+    const LabelFolder& f = library.folders()[0];
+    EXPECT_TRUE(f.cache.autoClass);
+    EXPECT_EQ(f.cache.photos.size(), 4u);  // the unusable photo is remembered too
+    EXPECT_EQ(f.usedPhotos(), 3);
+    EXPECT_EQ(f.cache.photos[0].roi, cv::Rect(10, 30, 40, 50));
+
+    // A later start: nothing to do.
+    LabelLibrary again(dir);
+    again.load();
+    EXPECT_FALSE(again.needsSync());
+    EXPECT_EQ(sync(again), 0);
+    EXPECT_EQ(embedders.embedder.calls, 6);
+    EXPECT_EQ(again.labels().size(), 1u);
+}
+
+TEST_F(LabelSync, OnlyNewAndChangedPhotosAreLookedAtAndRemovedOnesDropped) {
+    const fs::path mug = fs::path(dir) / "mug";
+    photo(mug / "a.png", 10);
+    photo(mug / "b.png", 60);
+    photo(mug / "c.png", 100);
+    LabelLibrary library(dir);
+    library.load();
+    sync(library);
+    ASSERT_EQ(embedders.embedder.calls, 6);
+
+    photo(mug / "b.png", 20, {90, 90, 90});  // changed
+    fs::remove(mug / "c.png");                // removed
+    photo(mug / "d.png", 70);                 // new
+    library.load();
+    const SyncPlan& plan = library.folders()[0].plan;
+    EXPECT_FALSE(plan.redoAll);
+    EXPECT_EQ(plan.look.size(), 2u);
+    EXPECT_EQ(plan.changed, std::vector<std::string>{"b.png"});
+    EXPECT_EQ(plan.removed, std::vector<std::string>{"c.png"});
+    EXPECT_EQ(sync(library), 1);
+    EXPECT_EQ(embedders.embedder.calls, 10);  // b and d, each also mirrored
+
+    const LabelFolder& f = library.folders()[0];
+    ASSERT_EQ(f.cache.photos.size(), 3u);
+    EXPECT_EQ(f.cache.photos[0].file.name, "a.png");
+    EXPECT_EQ(f.cache.photos[1].file.name, "b.png");
+    EXPECT_EQ(f.cache.photos[1].roi, cv::Rect(20, 30, 40, 50));
+    EXPECT_EQ(f.cache.photos[2].file.name, "d.png");
+    EXPECT_EQ(library.labels()[0].samples.size(), 6u);
+}
+
+TEST_F(LabelSync, SettingsInLabelYmlChooseTheClassAndWholePhotos) {
+    const fs::path mug = fs::path(dir) / "mug";
+    photo(mug / "a.png", 10);
+    photo(mug / "close_up.png", -1, {20, 20, 230});  // all red: the cup fills the photo
+    std::ofstream(mug / "label.yml") << "class: bottle\n";
+    LabelLibrary library(dir);
+    library.load();
+    sync(library);
+    EXPECT_TRUE(library.labels().empty()) << "no bottle in the photos";
+    EXPECT_EQ(library.folders()[0].cache.baseClass, "bottle");
+    EXPECT_FALSE(library.folders()[0].cache.autoClass);
+
+    std::ofstream(mug / "label.yml") << "# my mug\nclass: cup\nwhole_photo: true\n";
+    library.load();
+    EXPECT_TRUE(library.folders()[0].plan.redoAll);
+    sync(library);
+    ASSERT_EQ(library.labels().size(), 1u);
+    EXPECT_TRUE(library.labels()[0].wholePhoto);
+    EXPECT_EQ(library.folders()[0].usedPhotos(), 2);
+    EXPECT_EQ(library.folders()[0].cache.photos[0].roi, cv::Rect(0, 0, 160, 120));
+}
+
+TEST_F(LabelSync, PhotosWithNothingFoundAreNotLookedAtOnEveryStart) {
+    const fs::path mug = fs::path(dir) / "mug";
+    photo(mug / "blank.png", -1);
+    LabelLibrary library(dir);
+    library.load();
+    sync(library);
+    EXPECT_TRUE(library.labels().empty());
+    EXPECT_FALSE(library.needsSync());
+
+    photo(mug / "a.png", 10);  // a photo that does show it: the class is chosen again
+    library.load();
+    EXPECT_TRUE(library.needsSync());
+    sync(library);
+    ASSERT_EQ(library.labels().size(), 1u);
+    EXPECT_EQ(library.labels()[0].baseClass, "cup");
+}
+
+TEST_F(LabelSync, BadFoldersAreReportedNotLoaded) {
+    photo(fs::path(dir) / "my mug" / "a.png", 10);  // a space: not a valid label name
+    photo(fs::path(dir) / "cup2" / "a.png", 10);
+    std::ofstream(fs::path(dir) / "cup2" / "label.yml") << "clas: cup\n";
+    photo(fs::path(dir) / "loose.png", 10);
+    LabelLibrary library(dir);
+    library.load();
+    ASSERT_EQ(library.folders().size(), 2u);
+    EXPECT_NE(library.folders()[0].problem.find("unknown setting 'clas'"), std::string::npos);
+    EXPECT_NE(library.folders()[1].problem.find("letters, digits"), std::string::npos);
+    EXPECT_EQ(library.loosePhotos(), std::vector<std::string>{"loose.png"});
+    sync(library);
+    EXPECT_TRUE(library.labels().empty());
+}
+
+TEST_F(LabelSync, EnrollCopiesPhotosIntoTheFolderOnce) {
+    const fs::path source = root / "photos";
+    photo(source / "a.png", 10);
+    photo(source / "b.png", 60);
+    LabelLibrary library(dir);
+    library.load();
+    enroll("mug", "", {(source / "a.png").string(), (source / "b.png").string()}, false, detector,
+           classes, embedders, library);
+    ASSERT_EQ(library.labels().size(), 1u);
+    EXPECT_TRUE(fs::exists(fs::path(dir) / "mug" / "a.png"));
+    EXPECT_TRUE(fs::exists(source / "a.png")) << "the originals stay";
+    EXPECT_FALSE(fs::exists(fs::path(dir) / "mug" / "label.yml")) << "nothing to set";
+
+    // The same photos again: nothing new. A different photo with a taken name: renamed.
+    photo(root / "other" / "a.png", 100);
+    enroll("mug", "cup",
+           {(source / "a.png").string(), (source / "b.png").string(),
+            (root / "other" / "a.png").string()},
+           false, detector, classes, embedders, library);
+    EXPECT_EQ(library.folders()[0].photos.size(), 3u);
+    EXPECT_TRUE(fs::exists(fs::path(dir) / "mug" / "a_2.png"));
+    EXPECT_EQ(readSettings((fs::path(dir) / "mug" / "label.yml").string()).baseClass, "cup");
+
+    EXPECT_THROW(enroll("mug", "bottle", {(source / "a.png").string()}, false, detector, classes,
+                        embedders, library),
+                 std::runtime_error);  // it's a cup
+    EXPECT_THROW(enroll("mug", "", {(source / "a.png").string()}, true, detector, classes,
+                        embedders, library),
+                 std::runtime_error);  // whole photos would change its other photos
+    EXPECT_THROW(enroll("bowl", "", {(source / "a.png").string()}, false, detector, classes,
+                        embedders, library, true),
+                 std::runtime_error);  // --add-photos to a label that doesn't exist
+    EXPECT_THROW(enroll("cup", "", {(source / "a.png").string()}, false, detector, classes,
+                        embedders, library),
+                 std::runtime_error);  // a class name
+    EXPECT_THROW(enroll("mug", "", {(source / "missing.png").string()}, false, detector, classes,
+                        embedders, library),
+                 std::runtime_error);
+}
+
+TEST_F(LabelSync, RenameKeepsTheEmbeddings) {
+    photo(fs::path(dir) / "mug" / "a.png", 10);
+    LabelLibrary library(dir);
+    library.load();
+    sync(library);
+    const int calls = embedders.embedder.calls;
+    renameLabel("mug", "my_mug", library, classes);
+    library.load();
+    EXPECT_FALSE(library.needsSync());
+    ASSERT_EQ(library.labels().size(), 1u);
+    EXPECT_EQ(library.labels()[0].name, "my_mug");
+    EXPECT_EQ(embedders.embedder.calls, calls);
+
+    photo(fs::path(dir) / "bowl" / "a.png", 10);
+    library.load();
+    EXPECT_THROW(renameLabel("my_mug", "bowl", library, classes), std::runtime_error);
+    EXPECT_THROW(renameLabel("my_mug", "cup", library, classes), std::runtime_error);
+    EXPECT_THROW(renameLabel("my_mug", "my mug", library, classes), std::runtime_error);
+    EXPECT_THROW(renameLabel("nothing", "x", library, classes), std::runtime_error);
+}
+
+TEST_F(LabelSync, RemoveMovesTheFolderAsideWithItsPhotos) {
+    photo(fs::path(dir) / "mug" / "a.png", 10);
+    LabelLibrary library(dir);
+    library.load();
+    sync(library);
+    const fs::path moved = removeLabel("mug", library);
+    EXPECT_EQ(moved, fs::path(dir) / ".removed" / "mug");
+    EXPECT_TRUE(fs::exists(moved / "a.png"));
+    EXPECT_FALSE(fs::exists(fs::path(dir) / "mug"));
+    library.load();
+    EXPECT_TRUE(library.folders().empty()) << ".removed isn't a label";
+
+    photo(fs::path(dir) / "mug" / "a.png", 10);
+    library.load();
+    EXPECT_EQ(fs::path(removeLabel("mug", library)), fs::path(dir) / ".removed" / "mug_2");
+    EXPECT_TRUE(fs::exists(moved / "a.png")) << "the first one is still there";
+    EXPECT_THROW(removeLabel("mug", library), std::runtime_error);
+}
+
+TEST_F(LabelSync, LabelsFromTheOldFormatAreConvertedAndKeepTheirEmbeddings) {
+    // What --enroll used to write: label.yml with the embeddings, next to the photos.
+    const fs::path mug = fs::path(dir) / "my_mug";
+    photo(mug / "a.png", 10);
+    photo(mug / "b.png", -1, {20, 20, 230});
+    const Embedding e1{1, 0, 0}, e2{0, 1, 0}, e3{0, 0, 1};
+    {
+        cv::FileStorage out((mug / "label.yml").string(), cv::FileStorage::WRITE);
+        out << "name" << "my_mug" << "base_class" << "cup" << "model" << "test-color"
+            << "threshold" << 0.8f;
+        out << "samples" << "[";
+        out << "{" << "image" << "a.png" << "roi" << cv::Rect(10, 30, 40, 50) << "flipped" << 0
+            << "embedding" << cv::Mat(e1) << "}";
+        out << "{" << "image" << "a.png" << "roi" << cv::Rect(110, 30, 40, 50) << "flipped" << 1
+            << "embedding" << cv::Mat(e2) << "}";
+        out << "{" << "image" << "b.png" << "roi" << cv::Rect(0, 0, 160, 120) << "flipped" << 0
+            << "embedding" << cv::Mat(e3) << "}";
+        out << "]";
+    }
+    LabelLibrary library(dir);
+    library.load();
+    EXPECT_TRUE(fs::exists(mug / ".label-v1.yml"));
+    ASSERT_EQ(library.labels().size(), 1u);
+    const CustomLabel& label = library.labels()[0];
+    EXPECT_EQ(label.baseClass, "cup");
+    EXPECT_FLOAT_EQ(label.threshold, 0.8f);
+    EXPECT_FALSE(label.wholePhoto) << "a.png's item was a box in the photo";
+    ASSERT_EQ(label.samples.size(), 3u);
+    EXPECT_EQ(label.samples[0].embedding, e1);
+    EXPECT_TRUE(label.samples[1].flipped);
+    EXPECT_EQ(label.samples[1].embedding, e2);
+    EXPECT_EQ(label.samples[2].embedding, e3);
+    const LabelSettings settings = readSettings((mug / "label.yml").string());
+    EXPECT_EQ(settings.baseClass, "cup");
+    EXPECT_FLOAT_EQ(settings.threshold, 0.8f);
+
+    // The photos haven't changed, so a sync has nothing to do.
+    EXPECT_FALSE(library.needsSync());
+    EXPECT_EQ(sync(library), 0);
+    EXPECT_EQ(embedders.embedder.calls, 0);
+    LabelLibrary again(dir);
+    again.load();  // converted once only
+    EXPECT_EQ(again.labels()[0].samples[0].embedding, e1);
+}

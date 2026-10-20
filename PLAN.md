@@ -216,6 +216,8 @@ Measured and changed from the plan:
 - Unlabeled tracks are checked every 0.25 s and labeled ones every 1 s. 4 misses in a row take a label away.
 - Not tested: telling two different items of the same class apart (the clips have one phone and one person). The 0.6 threshold sits above 90% of other-object scores. Identical products can't be told apart from pictures.
 
+**Label database, 2026-10-20** (branch `v2-labels-db`): each label is a folder of photos, synced at startup. Embeddings are cached per photo in `.embeddings.yml` (keyed by size and modification time), and `label.yml` now holds optional settings (`class`, `whole_photo`, `threshold`). Also added: `--sync-labels`, `--add-photos`, `--rename-label`; `--remove-label` moves the folder to `labels/.removed/`. A sync warns about unusable photos, labels with few usable photos, outlier photos and look-alike labels. Old labels are converted on load. Checked with labels rebuilt from the clips in the old format: after conversion, `me` was still on 99% of face frames and `my_phone` on 75% of phone frames. Drop-folder labels (`tools/grab_frames` photos from the clips) got 99% (face) and 76% (phone, close-up crops with `whole_photo`).
+
 Original plan:
 - **Concept: embeddings.** A neural network turns an image crop into a vector, and crops of the same item produce vectors pointing in nearly the same direction. Cosine similarity measures that, and several photos give several vectors, which covers more angles and lighting.
   - **Faces:** SFace (OpenCV's `FaceRecognizerSF`, `face_recognition_sface_2021dec.onnx`), aligned using YuNet's landmarks. It's built for telling faces apart.

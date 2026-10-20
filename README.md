@@ -54,20 +54,31 @@ keeps the result in `.cache/coreml/`. A model runs on CoreML only if CoreML can 
 it runs on the CPU, which was faster for the partly supported palm model.
 
 ## Custom labels
-Teach it a specific item, such as your mug or a person's face, from a few photos:
+Teach it a specific item, such as your mug or a person's face, from a few photos. Each label is a folder of photos in `labels/`:
+
+1. Make a folder named after the item, e.g. `labels/my_mug/` (letters, digits, `_` and `-`).
+2. Put **5–10 photos** of it there, from different angles and in different light. JPEG and PNG work; convert iPhone HEIC photos first (`sips -s format jpeg IMG_1234.heic --out IMG_1234.jpg`).
+3. Run the tracker. At startup it looks at new, changed and removed photos, says for each one whether it found the item, and warns about anything that would hurt recognition.
+
 ```sh
-./build/tracker --enroll my_mug mug1.jpg mug2.jpg mug3.jpg mug4.jpg mug5.jpg
-./build/tracker --enroll alex alex1.jpg alex2.jpg alex3.jpg       # a face: it finds the face itself
-./build/tracker --list-labels
-./build/tracker --classes my_mug          # detect cups, show only the one that is my_mug
-./build/tracker --remove-label my_mug     # deletes the label and its copied photos
+./build/tracker --sync-labels                  # do step 3 now, and check every label
+./build/tracker --list-labels                  # class, photos and usable photos per label
+./build/tracker --enroll my_mug a.jpg b.jpg    # or: copy photos into labels/my_mug/ and sync
+./build/tracker --add-photos my_mug c.jpg      # copy more photos in
+./build/tracker --rename-label my_mug mug
+./build/tracker --remove-label mug             # moves labels/mug/ to labels/.removed/, photos and all
+./build/tracker --classes my_mug               # detect cups, show only the one that is my_mug
 ```
-- It finds the item in each photo with the normal detectors (add `--class cup` to say what it is). It copies the photos to `labels/<name>/` and stores a neural-network *embedding* of each, plus a mirrored copy, in `label.yml`.
-- Embeddings come from SFace for faces and DINOv2 for objects. Enrolling the same name again adds photos.
-- Photos where the item can't be found are skipped. For close-ups that show only the item, use `--whole-photo`.
-- **5–10 photos from different angles and in different light work best.** Enrollment reports how well the photos agree with each other and points out any that don't fit.
-- While tracking, objects of a labeled class are checked in the background a few times a second. A track takes the label after 3 matching checks, and each label is one item, so at most one track has it.
+- **What the item is:** by default the class that stands out most across the photos (a face rather than the whole person), and it stays. To set it, or for close-ups that show just the item, put a `label.yml` in the folder (`--enroll` writes it for `--class cup` and `--whole-photo`):
+  ```yaml
+  class: cup          # see --list-classes
+  whole_photo: true   # optional: each photo shows just the item
+  ```
+- It stores a neural-network *embedding* of the item in each photo, plus a mirrored copy, in the folder's hidden `.embeddings.yml` (SFace for faces, DINOv2 for objects). Only new or changed photos are looked at again.
+- Photos where the item isn't found aren't used. A sync also points out photos that don't look like the rest, labels with fewer than 5 usable photos, and labels of the same class so alike that recognition may mix them up.
+- While tracking, objects of a labeled class are checked in the background a few times a second. A track takes the label after 3 matching checks, and each label is one item, so at most one track has it. Label changes are picked up at the next start.
 - Labeled tracks show the label instead of `class #n`. A face under a bright light still shows `TARGET`.
+- Labels made by an earlier version (one `label.yml` with the embeddings) are converted automatically; the old file is kept as `.label-v1.yml`.
 - `labels/` holds your photos and isn't committed to git.
 
 Telling *a* mug from *your* mug works when the photos cover the angles you'll show it from. Two identical products (two of the same phone) can't be told apart from pictures alone.
@@ -92,8 +103,9 @@ src/        Camera (capture thread); ClassRegistry (all class ids); Detector run
             (ONNX Runtime + CoreML); Tracker (+ KalmanBox, Assignment); Targeting (TARGET);
             Embedder, Labels, Enrollment, Recognizer (custom labels); Options; Overlay
             (+ TagLayout); Logger; main
-labels/     custom labels: photos + label.yml per label (not in git)
-tools/      replay.cpp: the tracker on saved detections (tracker_replay)
+labels/     custom labels: a folder of photos per label, with optional label.yml (not in git)
+tools/      replay.cpp: the tracker on saved detections (tracker_replay); grab_frames.cpp:
+            a video's frames, or crops of one class, saved as photos (grab_frames)
 tests/      GoogleTest unit tests (tracker_tests)
 scripts/    fetch_models.sh, export_yolo.sh, log_stats.py
 models/     coco.names (tracked); *.onnx (downloaded, not in git)

@@ -57,6 +57,20 @@ TEST(Options, EnrollTakesANameAndPhotos) {
     EXPECT_THROW(parse({"--class", "cup"}), std::runtime_error);      // --class without --enroll
 }
 
+TEST(Options, LabelCommands) {
+    Options opt = parse({"--add-photos", "my_mug", "c.jpg"});
+    EXPECT_EQ(opt.enrollName, "my_mug");
+    EXPECT_TRUE(opt.addPhotos);
+    EXPECT_EQ(opt.enrollPhotos, std::vector<std::string>{"c.jpg"});
+    EXPECT_THROW(parse({"--add-photos", "my_mug"}), std::runtime_error);  // no photos
+    EXPECT_THROW(parse({"--add-photos", "my_mug", "c.jpg", "--class", "cup"}), std::runtime_error);
+    EXPECT_TRUE(parse({"--sync-labels"}).syncLabels);
+    opt = parse({"--rename-label", "mug", "my_mug"});
+    EXPECT_EQ(opt.renameLabel, "mug");
+    EXPECT_EQ(opt.renameTo, "my_mug");
+    EXPECT_THROW(parse({"--rename-label", "mug"}), std::runtime_error);  // no new name
+}
+
 TEST(Options, ModelFlagsMarkTheModelAsRequired) {
     const Options opt = parse({"--model", "other.onnx"});
     EXPECT_EQ(opt.yoloModel.path, "other.onnx");

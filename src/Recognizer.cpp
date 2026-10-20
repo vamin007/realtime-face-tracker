@@ -31,6 +31,14 @@ IEmbedder& Embedders::forKind(ClassKind kind) {
     return *object_;
 }
 
+std::string Embedders::modelId(ClassKind kind) const {
+    return kind == ClassKind::Face ? FaceEmbedder::kModelId : ObjectEmbedder::kModelId;
+}
+
+float Embedders::defaultThreshold(ClassKind kind) const {
+    return kind == ClassKind::Face ? FaceEmbedder::kThreshold : ObjectEmbedder::kThreshold;
+}
+
 std::string Embedders::info(ClassKind kind) {
     if (kind == ClassKind::Face) return "SFace, OpenCV CPU";
     forKind(kind);
