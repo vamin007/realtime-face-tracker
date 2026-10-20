@@ -30,10 +30,12 @@ public:
 // Faces: SFace (OpenCV's FaceRecognizerSF), trained to tell people apart.
 class FaceEmbedder : public IEmbedder {
 public:
+    static constexpr const char* kModelId = "sface-2021dec";
+    static constexpr float kThreshold = 0.363f;  // OpenCV's recommended cosine threshold for SFace
+
     explicit FaceEmbedder(const std::string& modelPath);
-    std::string modelId() const override { return "sface-2021dec"; }
-    // OpenCV's recommended cosine threshold for SFace.
-    float defaultThreshold() const override { return 0.363f; }
+    std::string modelId() const override { return kModelId; }
+    float defaultThreshold() const override { return kThreshold; }
     Embedding embed(const cv::Mat& frame, const cv::Rect2f& box,
                     const std::vector<cv::Point2f>& keypoints) override;
 
@@ -47,16 +49,18 @@ private:
 // other objects 0.29 (0.57 at the 90th), hence the 0.6 threshold.
 class ObjectEmbedder : public IEmbedder {
 public:
+    static constexpr const char* kModelId = "dinov2-small-patchmean";
+    static constexpr float kThreshold = 0.6f;
+
     ObjectEmbedder(const std::string& modelPath, Backend backend, const std::string& cacheDir);
-    std::string modelId() const override { return "dinov2-small-patchmean"; }
-    float defaultThreshold() const override { return threshold_; }
+    std::string modelId() const override { return kModelId; }
+    float defaultThreshold() const override { return kThreshold; }
     Embedding embed(const cv::Mat& frame, const cv::Rect2f& box,
                     const std::vector<cv::Point2f>& keypoints) override;
     std::string info() const { return model_->backendInfo(); }
 
 private:
     std::unique_ptr<OrtModel> model_;
-    float threshold_ = 0.6f;
 };
 
 // Mirrors a box and its keypoints left-right within an image `width` wide. Face

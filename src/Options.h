@@ -38,10 +38,13 @@ struct Options {
     // One-off commands instead of tracking.
     bool listClasses = false;
     bool listLabels = false;
+    bool syncLabels = false;  // look at new and changed label photos, report, exit
     std::string removeLabel;
-    std::string enrollName;  // --enroll NAME photo...
+    std::string renameLabel, renameTo;
+    std::string enrollName;  // --enroll NAME photo... (or --add-photos NAME photo...)
     std::string enrollClass;
     bool wholePhoto = false;  // each enrollment photo shows just the item
+    bool addPhotos = false;   // --add-photos: the label must exist already
     std::vector<std::string> enrollPhotos;
 
     // Developer options

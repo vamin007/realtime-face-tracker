@@ -85,12 +85,17 @@ void printUsage() {
            "  --target-ratio N      a lit face is N times as bright as the room (default 1.0)\n"
            "  --target-rise N       ... and N times brighter than it normally is (default 1.35)\n"
            "\nCustom labels (a specific item, taught from photos):\n"
+           "  Each label is a folder of photos, labels/NAME/; new and changed photos are\n"
+           "  looked at when the tracker starts.\n"
            "  --enroll NAME PHOTO...  teach an item (e.g. --enroll my_mug a.jpg b.jpg c.jpg)\n"
            "  --class CLASS         with --enroll: what it is (e.g. cup); default: what stands "
            "out\n"
            "  --whole-photo         with --enroll: each photo shows just the item (close-ups)\n"
+           "  --add-photos NAME PHOTO...  add photos to a label\n"
+           "  --sync-labels         look at new and changed photos now, check the labels, exit\n"
            "  --list-labels         list the labels and exit\n"
-           "  --remove-label NAME   delete a label and its photos\n"
+           "  --rename-label OLD NEW  rename a label\n"
+           "  --remove-label NAME   move a label to labels/.removed/ (its photos are kept)\n"
            "  --no-labels           don't recognize labels\n"
            "  --labels-dir DIR      where labels are kept (default labels/)\n"
            "\nModels:\n"
@@ -147,9 +152,16 @@ bool parseArgs(const std::vector<std::string>& args, Options& opt) {
         else if (arg == "--enroll") opt.enrollName = next();
         else if (arg == "--class") opt.enrollClass = next();
         else if (arg == "--whole-photo") opt.wholePhoto = true;
+        else if (arg == "--add-photos") {
+            opt.enrollName = next();
+            opt.addPhotos = true;
+        } else if (arg == "--sync-labels") opt.syncLabels = true;
         else if (arg == "--list-labels") opt.listLabels = true;
         else if (arg == "--remove-label") opt.removeLabel = next();
-        else if (arg == "--no-labels") opt.labels = false;
+        else if (arg == "--rename-label") {
+            opt.renameLabel = next();
+            opt.renameTo = next();
+        } else if (arg == "--no-labels") opt.labels = false;
         else if (arg == "--labels-dir") opt.labelsDir = next();
         else if (arg == "--model") opt.yoloModel = {next(), true};
         else if (arg == "--face-model") opt.faceModel = {next(), true};
@@ -177,8 +189,9 @@ bool parseArgs(const std::vector<std::string>& args, Options& opt) {
         throw std::runtime_error("Unexpected argument '" + opt.enrollPhotos.front() +
                                  "' (photos go with --enroll NAME)");
     if (!opt.enrollName.empty() && opt.enrollPhotos.empty())
-        throw std::runtime_error("--enroll " + opt.enrollName + " needs at least one photo");
-    if (!opt.enrollClass.empty() && opt.enrollName.empty())
+        throw std::runtime_error((opt.addPhotos ? "--add-photos " : "--enroll ") + opt.enrollName +
+                                 " needs at least one photo");
+    if (!opt.enrollClass.empty() && (opt.enrollName.empty() || opt.addPhotos))
         throw std::runtime_error("--class goes with --enroll");
     if (!opt.window && opt.video.empty() && opt.maxFrames == 0)
         throw std::runtime_error(

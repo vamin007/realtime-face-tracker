@@ -15,13 +15,17 @@
 #include "Tracker.h"
 
 // The two embedding models, loaded on first use (DINOv2 isn't needed unless an
-// object label exists).
+// object label exists). Virtual so tests can stand in simpler ones.
 class Embedders {
 public:
     Embedders(std::string faceModel, std::string objectModel, Backend backend,
               std::string cacheDir);
-    IEmbedder& forKind(ClassKind kind);  // faces: SFace; anything else: DINOv2
+    virtual ~Embedders() = default;
+    virtual IEmbedder& forKind(ClassKind kind);  // faces: SFace; anything else: DINOv2
     std::string info(ClassKind kind);
+    // The model's id and default threshold, without loading it.
+    virtual std::string modelId(ClassKind kind) const;
+    virtual float defaultThreshold(ClassKind kind) const;
 
 private:
     std::string faceModel_, objectModel_, cacheDir_;

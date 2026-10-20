@@ -134,26 +134,6 @@ void registerLabels(const LabelLibrary& library, ClassRegistry& classes) {
     }
 }
 
-void listLabels(const LabelLibrary& library) {
-    if (library.labels().empty()) {
-        std::cout << "No labels in " << library.dir() << " (add one with --enroll)\n";
-        return;
-    }
-    for (const CustomLabel& label : library.labels())
-        std::cout << label.name << "  (" << label.baseClass << ", " << label.samples.size() / 2
-                  << " photos)\n";
-}
-
-void removeLabel(const std::string& name, const LabelLibrary& library) {
-    const int index = library.find(name);
-    if (index < 0) throw std::runtime_error("No label named '" + name + "' (see --list-labels)");
-    const size_t photos = library.labels()[index].samples.size() / 2;
-    const std::string folder = library.folder(name);
-    fs::remove_all(folder);
-    std::cout << "Removed label " << name << " and its " << photos << " photo(s) in " << folder
-              << '\n';
-}
-
 void dumpDetections(std::ofstream& out, long long frame, double tMs,
                     const std::vector<Detection>& detections, const ClassRegistry& classes) {
     for (const Detection& d : detections) {
@@ -189,10 +169,10 @@ int main(int argc, char** argv) try {
 
     ClassRegistry classes = ClassRegistry::fromFile(opt.names);
     LabelLibrary library(opt.labelsDir);
-    library.load();
-    registerLabels(library, classes);
+    library.load();  // label folders (ones made by an older version are converted)
 
     if (opt.listClasses) {
+        registerLabels(library, classes);
         for (ClassId id = 0; id < classes.size(); ++id) std::cout << classes.name(id) << '\n';
         return 0;
     }
@@ -204,19 +184,37 @@ int main(int argc, char** argv) try {
         removeLabel(opt.removeLabel, library);
         return 0;
     }
+    if (!opt.renameLabel.empty()) {
+        renameLabel(opt.renameLabel, opt.renameTo, library, classes);
+        return 0;
+    }
 
     // Fall back to the square YOLO model if the 16:9 one hasn't been exported.
     if (!opt.yoloModel.explicitlySet && !fs::exists(opt.yoloModel.path))
         opt.yoloModel.path = fs::path(opt.yoloModel.path).parent_path() / "yolov8n.onnx";
 
+    // Label photos are searched with every detector, whatever this run tracks.
+    if (!opt.enrollName.empty() || opt.syncLabels) opt.faces = opt.hands = true;
     Detector detector;
     buildDetectors(detector, opt, classes);
     Embedders embedders(opt.faceIdModel.path, opt.objectIdModel.path, opt.backend, opt.cacheDir);
     if (!opt.enrollName.empty()) {
         enroll(opt.enrollName, opt.enrollClass, opt.enrollPhotos, opt.wholePhoto, detector, classes,
-               embedders, library);
+               embedders, library, opt.addPhotos);
         return 0;
     }
+    if (opt.syncLabels) {
+        syncLabels(library, detector, classes, embedders, true);
+        return 0;
+    }
+    // Photos added to label folders since the last run are looked at now, with
+    // every detector (so not when some are turned off).
+    if (opt.labels && library.needsSync() && (!opt.faces || !opt.hands)) {
+        std::cout << "Label photos changed; run --sync-labels to look at them\n";
+    } else if (opt.labels && library.needsSync()) {
+        syncLabels(library, detector, classes, embedders, false);
+    }
+    registerLabels(library, classes);
 
     std::cout << "Detectors (" << (opt.parallel ? "side by side" : "one after another") << "):\n";
     for (const std::string& line : detector.summary()) std::cout << "  " << line << '\n';
