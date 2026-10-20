@@ -9,6 +9,8 @@ Each run also writes a CSV log of every visible track.
   and center distance; confident detections first, then weak ones to keep existing tracks going (ByteTrack's
   idea). Tracks ride out short drop-outs and wait at the frame edge for objects that left. Each type is
   numbered on its own (`hand #1`, `hand #2`, `face #1`), and numbers are never reused within a run.
+  The filter smooths detection jitter, but a box snaps to its detection when the object moves faster than
+  the filter expects (a waved hand), so it doesn't trail behind.
 - **TARGET:** when a bright light suddenly shines on a face, that face gets a red box labeled `TARGET`.
   Brightness is judged relative to the room and to the face's own normal level, so a face that is always
   bright, a room light switching on, a bright phone or a hand held up to the face don't count. Only faces
@@ -45,7 +47,7 @@ ctest --test-dir build           # unit tests (needs googletest)
 ./build/tracker --help                   # all options
 ```
 Keys: `p` pause/resume, `t` trails on/off, `d` debug view on/off, `q` or `Esc` quit. Ctrl-C in the terminal also stops cleanly.
-Thin boxes are predictions: the object wasn't detected in that frame, and the tracker is keeping its box going.
+Thin boxes are predictions: the object hasn't been detected for a few frames, and the tracker is keeping its box going.
 The first camera run asks for camera access: allow it for your terminal app in **System Settings → Privacy & Security → Camera**.
 
 At startup it prints where each detector runs. CoreML compiles a model on first use (a few seconds) and
@@ -72,17 +74,20 @@ Teach it a specific item, such as your mug or a person's face, from a few photos
 Telling *a* mug from *your* mug works when the photos cover the angles you'll show it from. Two identical products (two of the same phone) can't be told apart from pictures alone.
 
 ## Logs
-Each run writes `logs/run_<date>_<time>.csv`: one row per visible track per frame. The columns are `time_ms`, `frame`, `id` (unique for the run), `number` (the one on screen), `class`, `label`, `matched` (0 = predicted box), the box, `conf`, `target` and `light_ratio` (faces). To summarize one or more runs:
+Each run writes `logs/run_<date>_<time>.csv`: one row per visible track per frame. The columns are `time_ms`, `frame`, `id` (unique for the run), `number` (the one on screen), `class`, `label`, `matched` (0 = not detected this frame), the box, `conf`, `target`, `light_ratio` (faces) and `coasting` (1 = drawn thin, as a prediction). To summarize one or more runs:
 ```sh
 scripts/log_stats.py logs/run_*.csv
 ```
-It prints the frame rate, the number of IDs per class and how long tracks lasted. Fewer IDs and longer lifetimes mean steadier tracking.
+It prints the frame rate, the number of IDs per class and how long tracks lasted. Fewer IDs and longer lifetimes mean steadier tracking. It also counts flicker per minute: boxes that vanish and come back, switch to thin, wobble or change class, label or number.
+
+Every run ends with the time per frame of each stage (mean and 95th percentile): how long the frame waited in the camera, detection, tracking, labels and targeting, drawing, display, and capture to screen in total.
 
 To tune the tracker without re-running the neural networks, save a clip's detections once and replay them:
 ```sh
 ./build/tracker --video clips/hands_face.mov --no-window --no-log --dump-detections /tmp/dets.csv
 ./build/tracker_replay /tmp/dets.csv --tracks lostTimeout=1.5   # any TrackerParams field
 ```
+Besides IDs it reports flicker and lag per class: how far the shown box is from its detection, overall and while the object moves fast, and how far behind it trails.
 
 ## Layout
 ```
