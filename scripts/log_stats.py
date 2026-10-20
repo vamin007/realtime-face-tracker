@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
-"""Summarize tracker CSV logs: frame rate, track IDs per class, and track lifetimes.
+"""Summarize tracker CSV logs: frame rate, track IDs per class, track lifetimes and flicker.
 
 Usage: scripts/log_stats.py logs/run_*.csv
 
 Fewer IDs per class and longer lifetimes mean steadier tracking. Short tracks
 (5 frames or fewer) are mostly identity breaks or noise.
+
+Flicker, per class (newer logs only; all counts are per minute of the clip):
+  gaps      a track was hidden and came back (visible -> hidden -> visible)
+  thin      a shown box switched to a thin, predicted box (coasting 0 -> 1; logs
+            without that column: matched 1 -> 0)
+  thin%     share of shown boxes that were thin
+  jit50/90  box wobble: the change in the box center's motion from one frame to
+            the next (second difference), in % of the box size; median and 90th
+            percentile. Steady motion scores 0, so this is noise, not movement.
+  size50/90 frame-to-frame change of width and height, in %
+  cls/lbl/num  changes of a track's class, custom label or number
 
 Reads the original columns (timestamp_ms,frame,id,class,...) and the newer ones
 (time_ms,frame,id,number,class,...). Original logs stamp each row with the wall
@@ -12,6 +23,7 @@ clock, so their FPS is the processing speed; newer logs use each frame's own tim
 (a video's position), so for a video the FPS is the video's frame rate.
 """
 import csv
+import math
 import statistics
 import sys
 from collections import defaultdict
@@ -26,10 +38,68 @@ def first_column(row, *names):
     raise KeyError(f"none of {names} in log columns {list(row)}")
 
 
+def percentile(values, p):
+    if not values:
+        return float("nan")
+    values = sorted(values)
+    return values[min(len(values) - 1, int(p / 100 * len(values)))]
+
+
+def flicker(rows_by_track, minutes):
+    """Flicker counts per class from each track's rows (frame order)."""
+    by_class = defaultdict(lambda: defaultdict(list))
+    for rows in rows_by_track.values():
+        stats = by_class[rows[-1]["class"]]
+        gaps = thin = cls = lbl = num = 0
+        for prev, row in zip(rows, rows[1:]):
+            gaps += row["frame"] > prev["frame"] + 1
+            if row["frame"] == prev["frame"] + 1:
+                thin += row["thin"] and not prev["thin"]
+            cls += row["class"] != prev["class"]
+            lbl += row["label"] != prev["label"]
+            num += row["number"] != prev["number"]
+        thin_rows = sum(r["thin"] for r in rows)
+        for key, value in (("gaps", gaps), ("thin", thin), ("thin_rows", thin_rows),
+                           ("rows", len(rows)), ("cls", cls), ("lbl", lbl), ("num", num)):
+            stats[key].append(value)
+        for a, b, c in zip(rows, rows[1:], rows[2:]):
+            if c["frame"] != a["frame"] + 2:
+                continue
+            size = math.sqrt(max(b["w"] * b["h"], 1))
+            jx = c["cx"] - 2 * b["cx"] + a["cx"]
+            jy = c["cy"] - 2 * b["cy"] + a["cy"]
+            stats["jitter"].append(100 * math.hypot(jx, jy) / size)
+        for a, b in zip(rows, rows[1:]):
+            if b["frame"] != a["frame"] + 1:
+                continue
+            for dim in ("w", "h"):
+                stats["size"].append(100 * abs(b[dim] - a[dim]) / max(a[dim], 1))
+
+    print(f"   {'flicker /min':<14}{'gaps':>6}{'thin':>6}{'thin%':>7}{'jit50':>7}{'jit90':>7}"
+          f"{'size50':>8}{'size90':>8}{'cls':>5}{'lbl':>5}{'num':>5}")
+    totals = defaultdict(list)
+    for cls in sorted(by_class, key=lambda c: -sum(by_class[c]["rows"])):
+        stats = by_class[cls]
+        for key, values in stats.items():
+            totals[key].extend(values)
+        print_flicker_row(cls, stats, minutes)
+    print_flicker_row("TOTAL", totals, minutes)
+
+
+def print_flicker_row(name, stats, minutes):
+    per_min = lambda key: sum(stats[key]) / minutes
+    thin_share = 100 * sum(stats["thin_rows"]) / max(sum(stats["rows"]), 1)
+    print(f"   {name:<14}{per_min('gaps'):>6.1f}{per_min('thin'):>6.1f}{thin_share:>6.1f}%"
+          f"{percentile(stats['jitter'], 50):>7.1f}{percentile(stats['jitter'], 90):>7.1f}"
+          f"{percentile(stats['size'], 50):>8.1f}{percentile(stats['size'], 90):>8.1f}"
+          f"{per_min('cls'):>5.1f}{per_min('lbl'):>5.1f}{per_min('num'):>5.1f}")
+
+
 def summarize(path):
     frames = set()
     times = []
     span = {}  # (class, id) -> [first frame, last frame]
+    rows_by_track = defaultdict(list)  # id -> rows, newer logs only
     with open(path, newline="") as f:
         for row in csv.DictReader(f):
             frame = int(row["frame"])
@@ -40,6 +110,13 @@ def summarize(path):
                 span[key][1] = frame
             else:
                 span[key] = [frame, frame]
+            if "matched" in row:
+                x, y, w, h = (float(row[k]) for k in ("x", "y", "w", "h"))
+                rows_by_track[row["id"]].append({
+                    "frame": frame, "class": row["class"], "label": row["label"],
+                    "number": row["number"],
+                    "thin": row["coasting"] == "1" if "coasting" in row else row["matched"] == "0",
+                    "cx": x + w / 2, "cy": y + h / 2, "w": w, "h": h})
 
     print(f"== {path}")
     if not frames:
@@ -62,6 +139,9 @@ def summarize(path):
     lives = [n for v in by_class.values() for n in v]
     short = sum(1 for n in lives if n <= SHORT_FRAMES)
     print(f"   {'TOTAL':<14}{len(lives):>5}{short:>7}{statistics.median(lives):>13.0f}{max(lives):>9}")
+
+    if rows_by_track and seconds > 0:
+        flicker(rows_by_track, seconds / 60)
 
 
 def main():

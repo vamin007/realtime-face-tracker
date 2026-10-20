@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <map>
 #include <set>
 
@@ -283,4 +284,65 @@ TEST_F(TrackerTest, LastingClassChangeGetsANumberInTheNewClass) {
     EXPECT_EQ(t.classId, kLaptop);
     EXPECT_EQ(t.number, 1);
     EXPECT_EQ(seen_.size(), 1u) << "same track, just relabeled";
+}
+
+// The detector missing an object for a frame or two doesn't change how its box
+// is drawn; a longer gap shows it as a prediction (thin), then hides it.
+TEST_F(TrackerTest, BriefDropOutIsNotDrawnAsAPrediction) {
+    Tracker tracker(classes);
+    for (int f = 0; f < 5; ++f) step(tracker, {det(100, 100)});
+    step(tracker, {});
+    step(tracker, {});
+    ASSERT_EQ(tracker.tracks().size(), 1u);
+    EXPECT_FALSE(tracker.tracks().front().matched);
+    EXPECT_FALSE(tracker.tracks().front().coasting) << "2 frames missing";
+    step(tracker, {});
+    step(tracker, {});
+    EXPECT_TRUE(tracker.tracks().front().visible);
+    EXPECT_TRUE(tracker.tracks().front().coasting) << "4 frames missing";
+}
+
+// Weak detections are often noise: they keep a track going but don't bring back
+// one that has been gone for a while. A confident detection does.
+TEST_F(TrackerTest, WeakDetectionsDontReviveALostTrack) {
+    Tracker tracker(classes);
+    for (int f = 0; f < 10; ++f) step(tracker, {det(300, 300, classes.hand())});
+    for (int f = 0; f < 30; ++f) step(tracker, {});  // 1 s
+    for (int f = 0; f < 5; ++f) step(tracker, {weakDet(300, 300, classes.hand())});
+    EXPECT_TRUE(visibleIds(tracker).empty());
+    step(tracker, {det(300, 300, classes.hand())});
+    EXPECT_EQ(visibleIds(tracker).size(), 1u);
+    EXPECT_EQ(seen_.size(), 1u) << "same track as before";
+}
+
+// YOLO calling one object tv, then laptop, then tv again: it keeps the tv number.
+TEST_F(TrackerTest, ClassChangeBackKeepsItsNumber) {
+    Tracker tracker(classes);
+    for (int f = 0; f < 10; ++f) step(tracker, {det(200, 200, kTv, 120)});
+    for (int f = 0; f < 40; ++f) step(tracker, {det(200, 200, kLaptop, 120)});
+    ASSERT_EQ(tracker.tracks().size(), 1u);
+    EXPECT_EQ(tracker.tracks().front().classId, kLaptop);
+    for (int f = 0; f < 40; ++f) step(tracker, {det(200, 200, kTv, 120)});
+    EXPECT_EQ(tracker.tracks().front().classId, kTv);
+    EXPECT_EQ(tracker.tracks().front().number, 1);
+    for (int f = 0; f < 5; ++f) step(tracker, {det(200, 200, kTv, 120), det(700, 400, kTv, 120)});
+    std::set<int> numbers;
+    for (const Track& t : tracker.tracks()) numbers.insert(t.number);
+    EXPECT_EQ(numbers, (std::set<int>{1, 2})) << "the next tv still gets a new number";
+}
+
+// A waved hand: the shown box stays on the hand instead of trailing behind it.
+TEST_F(TrackerTest, WavedHandBoxKeepsUp) {
+    Tracker tracker(classes);
+    double error = 0;
+    int frames = 0;
+    for (int f = 0; f < 90; ++f) {  // 3 s, waving twice a second, 150 px each way
+        const float x = 500 + 150 * std::sin(2 * static_cast<float>(CV_PI) * 2 * f * kFrame);
+        step(tracker, {det(x, 300, classes.hand(), 120)});
+        if (f < 10) continue;
+        ASSERT_EQ(visibleIds(tracker).size(), 1u);
+        error += std::abs(tracker.tracks().front().box.x - x);
+        ++frames;
+    }
+    EXPECT_LT(error / frames, 6.0) << "mean px behind a 120 px hand";
 }

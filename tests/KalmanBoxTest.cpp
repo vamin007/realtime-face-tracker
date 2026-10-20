@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cmath>
+
 #include "KalmanBox.h"
 
 namespace {
@@ -50,4 +53,66 @@ TEST(KalmanBox, DampingSlowsItDown) {
     const float before = kf.velocity().x;
     kf.dampVelocity(0.5f);
     EXPECT_NEAR(kf.velocity().x, before / 2, 1e-3);
+}
+
+// A detection far from the filtered box (the object sped up or turned): the box
+// follows the detection instead of trailing behind it.
+TEST(KalmanBox, FollowsADetectionFarFromItsEstimate) {
+    KalmanBox kf({0, 100, 50, 50}, {});
+    for (int f = 1; f <= 10; ++f) {
+        kf.predict(kFrame);
+        kf.correct({0, 100, 50, 50});
+    }
+    kf.predict(kFrame);
+    kf.correct({30, 100, 50, 50});  // 0.6 box sizes away
+    EXPECT_NEAR(kf.box().x, 30, 1);
+}
+
+// Small differences are detection jitter: the box moves less than the detections.
+TEST(KalmanBox, SmoothsSmallJitter) {
+    KalmanBox kf({0, 100, 50, 50}, {});
+    float lo = 1e9f, hi = -1e9f;
+    for (int f = 1; f <= 40; ++f) {
+        kf.predict(kFrame);
+        kf.correct({f % 2 ? 2.0f : 0.0f, 100, 50, 50});  // +-1 px around x = 1
+        if (f > 20) lo = std::min(lo, kf.box().x), hi = std::max(hi, kf.box().x);
+    }
+    EXPECT_LT(hi - lo, 1.0f) << "detections jump 2 px every frame";
+}
+
+// A waved hand: the box stays on the detections, where a plain constant-velocity
+// filter trails behind.
+TEST(KalmanBox, KeepsUpWithAWavedHand) {
+    KalmanBox::Params plain;
+    plain.snapStart = plain.snapFull = 1e9f;  // never follows the detection
+    KalmanBox snapping({0, 300, 50, 50}, {}), smoothOnly({0, 300, 50, 50}, plain);
+    double snapError = 0, plainError = 0;
+    for (int f = 1; f <= 60; ++f) {  // 2 s, waving twice a second, 100 px each way
+        const float x = 100 * std::sin(2 * static_cast<float>(CV_PI) * 2 * f * kFrame);
+        for (KalmanBox* kf : {&snapping, &smoothOnly}) {
+            kf->predict(kFrame);
+            kf->correct({x, 300, 50, 50});
+        }
+        snapError += std::abs(snapping.box().x - x) / 60;
+        plainError += std::abs(smoothOnly.box().x - x) / 60;
+    }
+    EXPECT_LT(snapError, 3.0) << "mean px behind the hand";
+    EXPECT_LT(snapError, plainError / 2);
+}
+
+// A weak detection counts as noisier: a small difference (jitter) moves the box
+// less than from a confident one, and it takes a bigger one to snap to it.
+TEST(KalmanBox, NoisierDetectionsMoveItLess) {
+    KalmanBox confident({0, 100, 50, 50}, {});
+    for (int f = 1; f <= 10; ++f) {
+        confident.predict(kFrame);
+        confident.correct({0, 100, 50, 50});
+    }
+    KalmanBox weak = confident;
+    confident.predict(kFrame);
+    confident.correct({3, 100, 50, 50});
+    weak.predict(kFrame);
+    weak.correct({3, 100, 50, 50}, 1.5f);
+    EXPECT_GT(weak.box().x, 0.0f);
+    EXPECT_LT(weak.box().x, confident.box().x - 0.2f);
 }

@@ -23,6 +23,7 @@
 #include "FaceDetector.h"
 #include "HandDetector.h"
 #include "Labels.h"
+#include "Latency.h"
 #include "Logger.h"
 #include "Options.h"
 #include "Overlay.h"
@@ -291,6 +292,10 @@ int main(int argc, char** argv) try {
     // Running totals for the summary at the end.
     double detectMsTotal = 0;
     std::map<std::string, double> detectorMsTotal;
+    LatencyStats latency;
+    auto msSince = [](Clock::time_point t) {
+        return std::chrono::duration<double, std::milli>(Clock::now() - t).count();
+    };
     std::vector<Track> filtered;
 
     cv::VideoWriter recorder;
@@ -308,6 +313,9 @@ int main(int argc, char** argv) try {
 
     while (!gStop && (opt.maxFrames == 0 || frameIndex < opt.maxFrames) &&
            camera.read(frame, tMs)) {
+        const auto frameStart = Clock::now();
+        const double ageMs = camera.frameAgeMs();  // waiting in the camera before processing
+        latency.add("capture age", ageMs);
         // Recorded as the camera delivers it (not mirrored), like a QuickTime recording,
         // so it plays back with --video exactly as it was seen.
         if (recorder.isOpened()) recorder.write(frame);
@@ -315,16 +323,22 @@ int main(int argc, char** argv) try {
 
         const auto t0 = Clock::now();
         const auto detections = detector.detect(frame, filter.detect);
-        detectMsTotal += std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+        const double detectMs = msSince(t0);
+        detectMsTotal += detectMs;
+        latency.add("detect", detectMs);
         for (const auto& t : detector.timings()) detectorMsTotal[t.name] += t.ms;
         if (dump.is_open()) dumpDetections(dump, frameIndex, tMs, detections, classes);
 
+        const auto t1 = Clock::now();
         tracker.update(detections, tMs / 1000.0);
+        latency.add("track", msSince(t1));
+        const auto t2 = Clock::now();
         // Recognition copies crops and targeting measures brightness: both happen
         // before anything is drawn on the frame.
         if (recognizer) recognizer->update(frame, tracker.tracks(), tMs / 1000.0);
         if (opt.targeting) targeting.update(frame, tracker.tracks(), tMs / 1000.0);
         if (lightDump.is_open()) dumpLight(lightDump, frameIndex, tMs, targeting);
+        latency.add("labels+target", msSince(t2));
 
         const std::vector<Track>* shown = &tracker.tracks();
         if (!filter.labelOnly.empty()) {
@@ -345,14 +359,17 @@ int main(int argc, char** argv) try {
 
         int visible = 0;
         for (const Track& t : *shown) visible += isVisible(t);
+        const auto t3 = Clock::now();
         drawTracks(frame, *shown, classes, draw);
         drawHud(frame, {fps, detector.timings(), visible});
+        latency.add("draw", msSince(t3));
         if (!opt.saveFrames.empty() && frameIndex % opt.saveEvery == 0) {
             char name[32];
             std::snprintf(name, sizeof(name), "/frame_%06lld.jpg", frameIndex);
             cv::imwrite(opt.saveFrames + name, frame);
         }
         if (opt.window) {
+            const auto t4 = Clock::now();
             cv::imshow(window, frame);
             int key = cv::waitKey(1);
             if (key == 'p') {  // pause: keep this frame on screen until p again
@@ -362,7 +379,9 @@ int main(int argc, char** argv) try {
             if (key == 't') draw.trails = !draw.trails;
             if (key == 'd') draw.debug = !draw.debug;
             if (key == 27 || key == 'q') break;
+            latency.add("display", msSince(t4));
         }
+        latency.add("capture to screen", ageMs + msSince(frameStart));
         ++frameIndex;
     }
 
@@ -378,6 +397,8 @@ int main(int argc, char** argv) try {
             sep = ", ";
         }
         std::printf(")\n");
+        std::printf("Latency per frame, ms (mean/95th percentile): %s\n",
+                    latency.summary().c_str());
     }
     if (camera.dropped() > 0)
         std::printf("Skipped %lld frames that arrived while busy\n", camera.dropped());

@@ -70,8 +70,8 @@ void drawTrack(cv::Mat& frame, const Track& t, const std::string& label, const c
             cv::line(frame, t.trail[i - 1], t.trail[i], color, w, cv::LINE_AA);
         }
     }
-    // A box kept on its prediction (no detection this frame) is drawn thinner.
-    cv::rectangle(frame, t.box, color, t.matched ? thickness : 1);
+    // A box kept on its prediction (missed for more than a frame or two) is drawn thinner.
+    cv::rectangle(frame, t.box, color, t.coasting ? 1 : thickness);
     drawLabel(frame, label, {static_cast<int>(t.box.x), static_cast<int>(t.box.y)}, color);
     if (options.debug) {
         const std::string extra = debugText(t, options);

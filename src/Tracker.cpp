@@ -19,10 +19,6 @@ float sizeOf(const cv::Rect2f& r) { return std::sqrt(std::max(r.area(), 1.0f)); 
 
 // Weight of the center distance next to (1 - IoU) in a pair's cost.
 constexpr float kDistanceWeight = 0.5f;
-// Class votes fade by this factor on every match, so recent detections count most.
-constexpr float kVoteDecay = 0.9f;
-// A different class takes over only once its votes beat the current class by this factor.
-constexpr float kClassSwitchMargin = 1.5f;
 // Smoothing of the displayed confidence (weight of the newest detection).
 constexpr float kConfSmoothing = 0.4f;
 // Smoothing of a track's typical size; hand boxes change a lot with the hand's pose.
@@ -105,7 +101,7 @@ void Tracker::match(const std::vector<size_t>& trackIdx, const std::vector<size_
 
 void Tracker::applyMatch(Track& t, const Detection& d, double now) {
     t.atEdge = touchesEdge(d.box);
-    t.kf.correct(d.box);
+    t.kf.correct(d.box, d.weak ? params_.weakNoise : 1.0f);
     // A box cut off by the edge shrinks as the object leaves; that isn't the
     // object getting smaller, so don't let it set a shrinking trend.
     if (t.atEdge) t.kf.stopResizing();
@@ -114,6 +110,7 @@ void Tracker::applyMatch(Track& t, const Detection& d, double now) {
     t.lastSeen = now;
     if (!d.weak) t.lastStrong = now;
     t.matched = true;
+    t.detected = d.box;
     t.keypoints = d.keypoints;
     if (!t.atEdge) t.refSize = (1 - kSizeSmoothing) * t.refSize + kSizeSmoothing * sizeOf(d.box);
     ++t.hits;
@@ -126,12 +123,18 @@ void Tracker::applyMatch(Track& t, const Detection& d, double now) {
 // Objects can be reported under different classes from frame to frame (tv and
 // laptop); the track keeps one identity and shows the class seen most lately.
 void Tracker::voteClass(Track& t, const Detection& d) {
-    for (auto& [cls, votes] : t.classVotes) votes *= kVoteDecay;
+    for (auto& [cls, votes] : t.classVotes) votes *= params_.voteDecay;
     t.classVotes[d.classId] += d.conf;
     if (d.classId == t.classId) return;
-    if (t.classVotes[d.classId] < kClassSwitchMargin * t.classVotes[t.classId]) return;
+    if (t.classVotes[d.classId] < params_.classSwitchMargin * t.classVotes[t.classId]) return;
     t.classId = d.classId;
-    if (t.confirmed) t.number = ++lastNumber_[t.classId];  // now a different kind of thing
+    // Now a different kind of thing: it takes the next number of that class, or
+    // the one it had before if it was this class earlier (chair -> tv -> chair).
+    if (t.confirmed) {
+        int& number = t.numbers[t.classId];
+        if (number == 0) number = ++lastNumber_[t.classId];
+        t.number = number;
+    }
 }
 
 Track Tracker::createTrack(const Detection& d, double now) {
@@ -145,6 +148,7 @@ Track Tracker::createTrack(const Detection& d, double now) {
     t.lastSeen = now;
     t.lastStrong = now;  // new tracks only start from confident detections
     t.matched = true;
+    t.detected = d.box;
     t.keypoints = d.keypoints;
     t.atEdge = touchesEdge(d.box);
     t.refSize = sizeOf(d.box);
@@ -158,7 +162,7 @@ Track Tracker::createTrack(const Detection& d, double now) {
 // never get shown don't use them up.
 void Tracker::confirm(Track& t) {
     t.confirmed = true;
-    t.number = ++lastNumber_[t.classId];
+    t.number = t.numbers[t.classId] = ++lastNumber_[t.classId];
 }
 
 void Tracker::update(const std::vector<Detection>& detections, double now) {
@@ -194,9 +198,13 @@ void Tracker::update(const std::vector<Detection>& detections, double now) {
     // 2. Confident detections against confirmed tracks, including recently lost ones.
     match(tracksWhere([](const Track& t) { return t.confirmed; }), strong, detections, now, false,
           detUsed);
-    // 3. Weak detections keep the remaining confirmed tracks going (never start new ones).
-    match(tracksWhere([](const Track& t) { return t.confirmed && !t.matched; }), unused(weak),
-          detections, now, true, detUsed);
+    // 3. Weak detections keep the remaining confirmed tracks going (never start new
+    //    ones, nor bring back a track lost a while ago: weak detections are often
+    //    noise, and they would drag a lost track away from where its object was).
+    match(tracksWhere([&](const Track& t) {
+              return t.confirmed && !t.matched && now - t.lastSeen <= params_.weakReacquire;
+          }),
+          unused(weak), detections, now, true, detUsed);
     // 4. The remaining confident detections against new, unconfirmed tracks.
     match(tracksWhere([](const Track& t) { return !t.confirmed; }), unused(strong), detections, now,
           false, detUsed);
@@ -235,5 +243,7 @@ void Tracker::update(const std::vector<Detection>& detections, double now) {
         const bool weakOnlyTooLong = now - t.lastStrong > bridge;
         t.visible =
             t.confirmed && inView && now - t.lastSeen <= params_.coastTime && !weakOnlyTooLong;
+        // A detector missing an object for a frame or two doesn't change how it's drawn.
+        t.coasting = !t.matched && now - t.lastSeen > params_.thinAfter;
     }
 }

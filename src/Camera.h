@@ -29,8 +29,12 @@ public:
     cv::Size frameSize() const { return size_; }
     double fps() const { return fps_; }
     long long dropped() const;  // frames skipped because processing was still busy
+    // How long ago the frame last returned by read() was captured (realtime
+    // playback: when it was due), in ms. It grows while processing waits.
+    double frameAgeMs() const;
 
 private:
+    using Clock = std::chrono::steady_clock;
     void captureLoop();
     bool grab(cv::Mat& frame, double& timeMs);
 
@@ -47,6 +51,8 @@ private:
     std::condition_variable changed_;
     cv::Mat latest_;
     double latestMs_ = 0;
+    Clock::time_point latestAt_;  // when latest_ was captured
+    Clock::time_point readAt_;    // ... and the frame last handed out by read()
     bool fresh_ = false;  // latest_ hasn't been handed out yet
     bool ended_ = false;
     bool stop_ = false;
