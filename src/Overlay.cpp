@@ -16,7 +16,6 @@ const cv::Scalar kPanel(28, 26, 24);    // background of tags and panels
 const cv::Scalar kSoft(225, 225, 225);  // body text on panels
 const cv::Scalar kDim(175, 175, 175);   // secondary text
 const cv::Scalar kAmber(0, 190, 255);   // PAUSED
-const double kPredictedAfter = 0.1;     // s unseen before a box is drawn as a prediction
 const double kPi = 3.14159265358979;
 
 // Sizes for a frame. Everything scales with the frame's height (1 at 720p), so
@@ -513,7 +512,7 @@ void Overlay::draw(cv::Mat& frame, const std::vector<Track>& tracks, const Class
         Shown s{t.id, toRect(t.box) & inFrame, trackColor(t.id), false, false, false, &t, ""};
         if (s.box.empty()) continue;
         s.target = target && t.id == target->trackId;
-        s.predicted = info.time - t.lastSeen >= kPredictedAfter;
+        s.predicted = t.coasting;
         // A custom label is one specific item, so it needs no number.
         const std::string* custom =
             options.recognizer ? options.recognizer->labelName(t.id) : nullptr;

@@ -274,6 +274,42 @@ Original plan:
 - **Camera:** checks the resolution it actually got and prints it.
 - Comments cleaned up (no change-log wording, no unmeasured claims). README updated.
 
+### Lag and flicker (2026-10-20, branch `v2-tracking`)
+On the live camera, boxes trailed behind moving hands and flickered. Measured on the reference clips (lag on
+replays of the same detections, the rest on full runs), hands unless noted, `hands_face` / `flashlight`:
+
+| | Before | After |
+|---|---|---|
+| Fast motion: box behind its detection, mean / 90th pct (% of box size) | 8.8 / 15.4, 11.4 / 22.6 | 4.0 / 7.0, 4.4 / 7.9 |
+| ... how far behind in time | 13 ms | 6–7 ms |
+| Not detected: box off the hand's path, mean / 90th pct | 33 / 71, 34 / 89 | 29 / 61, 21 / 36 |
+| Box switches to thin, per minute | 57, 15 | 24, 11 |
+| Box vanishes and comes back, per minute | 15.1, 4.6 | 13.3, 2.3 |
+| Wobble while slow, 90th pct (% of box size) | 4.7, 6.1 | 4.2, 5.3 |
+| Phone: class / number changes per minute | 5.7 / 3.4 | 2.3 / 2.3 |
+| Hand IDs, realtime FPS, labels | 4, 4; 30; face 99%, phone 75–78% | unchanged |
+
+What the measurements showed:
+- The pipeline wasn't the lag: capture to screen takes about 24 ms (detection 14 ms, tracking under 0.1 ms),
+  and boxes are drawn on the frame they were detected in. Every run now prints this breakdown.
+- The Kalman filter trailed a waved hand: it keeps about 40% of its old estimate each frame. Where the filtered box
+  still differs from the detection by more than the detection jitter, it now snaps toward the detection (fully
+  at twice the jitter; width and height at twice that). Weak detections count as 1.5× noisier: snapping
+  to every noisy weak palm box made the next one miss the track.
+- A missed hand was predicted worse than simply holding its last box (it turns or changes shape rather than
+  flying on), so velocity now halves every 0.05 s while unseen instead of 0.15 s.
+- Most thin boxes were 1–2 frame detector misses. A box is drawn thin only after 0.1 s without a detection.
+- Weak detections revived lost tracks and dragged them onto junk (with snapping, a false toothbrush stayed up
+  for 20 s). They now only keep a track going that was seen in the last 0.5 s.
+- The flashlight phone was called chair, tv, chair, vase, cell phone, with a new number each time. Class votes
+  fade more slowly (0.95 per match), and a track that returns to a class keeps its number in it.
+- A hand passing in front of the lit face blocks its light measurement for over 0.5 s, which dropped TARGET for
+  a few frames (twice before, three times with the faster hand boxes). The target now rides out 0.75 s. All
+  lit periods still become TARGET at the same frames; there are 8 unbroken TARGET runs where there were 10
+  pieces before, and one releases 0.3 s sooner, right after the light goes off.
+- Left as is: the coast time (0.2 s). Most remaining gaps are hands gone for over half a second, and a longer
+  coast only kept ghost boxes up longer.
+
 ## Risks and fallbacks
 - **CoreML support:** checked 2026-10-15. Homebrew's ONNX Runtime (1.31.0) is built with `-Donnxruntime_USE_COREML=ON` on macOS. `Ort::GetAvailableProviders()` confirms it at startup anyway.
 - **CoreML may not run every layer.** Unsupported layers (more likely in DINOv2's transformer) fall back to the CPU. The per-stage HUD timings will show it, and `--backend cpu` can be used for comparison.

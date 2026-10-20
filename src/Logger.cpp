@@ -16,7 +16,8 @@ Logger::Logger(const std::string& logDir) {
 
     out_.open(path_);
     if (!out_) throw std::runtime_error("Failed to open log file: " + path_);
-    out_ << "time_ms,frame,id,number,class,label,matched,x,y,w,h,conf,target,light_ratio\n";
+    out_ << "time_ms,frame,id,number,class,label,matched,x,y,w,h,conf,target,light_ratio,"
+            "coasting\n";
 }
 
 void Logger::log(long long frameIndex, double timeMs, const std::vector<Track>& tracks,
@@ -35,7 +36,7 @@ void Logger::log(long long frameIndex, double timeMs, const std::vector<Track>& 
             const auto it = targeting->faces().find(t.id);
             if (it != targeting->faces().end()) out_ << it->second.ratio;
         }
-        out_ << '\n';
+        out_ << ',' << (t.coasting ? 1 : 0) << '\n';
     }
     // Flush about once a second so a crash loses little.
     if (timeMs - lastFlushMs_ >= 1000) {

@@ -17,9 +17,11 @@ struct Track {
     bool confirmed = false;  // matched often enough to be shown
     bool visible = false;    // drawn and logged this frame
     bool matched = false;    // matched to a detection this frame
+    bool coasting = false;   // missing for more than a brief drop-out: drawn thin, as a prediction
     int hits = 1;            // detections matched so far
     double lastSeen = 0;     // time of the last matched detection, seconds
     double lastStrong = 0;   // ... of the last confident (not weak) one
+    cv::Rect2f detected;     // box of the last matched detection
     std::vector<cv::Point2f> keypoints;  // from the last matched detection
     std::deque<cv::Point2f> trail;       // recent centers, newest at the back
 
@@ -27,6 +29,7 @@ struct Track {
     KalmanBox kf;
     double kfTime = 0;                    // time the filter was last advanced to
     std::map<ClassId, float> classVotes;  // objects: recent confidence per class
+    std::map<ClassId, int> numbers;       // the number it was given in each class it had
     float refSize = 0;    // typical size from detections not cut off by the frame edge
     bool atEdge = false;  // the last detection touched the frame edge (it may have left)
 };
@@ -38,10 +41,16 @@ struct TrackerParams {
                                     //    (hands often vanish for over a second, e.g. in hair)
     double exitTimeout = 3.0;       // s: ... or this long if it was last seen at the frame edge
     double coastTime = 0.2;         // s: a missing confirmed track stays visible this long
+    double thinAfter = 0.1;   // s: ... and is drawn thin (a prediction) once missing this long
     double weakBridge = 1.0;  // s: weak detections alone keep an object (YOLO) visible this long
     double weakBridgeFaceHand = 2.0;  // s: ... and a face or hand
     double weakTimeout = 5.0;  // s: any track with no confident detection this long is dropped
-    double velocityHalfLife = 0.15;  // s: while unseen, a track's velocity halves this often
+    double weakReacquire = 0.5;  // s: weak detections match only tracks seen this recently
+    float weakNoise = 1.5f;      // weak detections count as this much noisier: they move a box less
+    // s: while unseen, a track's velocity halves this often. Short: a hand the detector
+    // misses mostly turns or changes shape, and holding its box predicted it better
+    // than carrying on at its last speed.
+    double velocityHalfLife = 0.05;
 
     // Matching. Distances are center distances in units of object size (the
     // square root of the box area; the geometric mean of the track and the detection).
@@ -55,6 +64,8 @@ struct TrackerParams {
     float classChangeMinIou = 0.5f;  // ... which must overlap the track at least this much
     float duplicateIou =
         0.7f;  // a new detection overlapping a matched track this much is a duplicate
+    float voteDecay = 0.95f;  // class votes fade by this on every match: recent ones count most
+    float classSwitchMargin = 1.5f;  // another class takes over once its votes are this much higher
 
     size_t trailLength = 40;
     KalmanBox::Params kalman;

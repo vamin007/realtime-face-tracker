@@ -56,18 +56,19 @@ bool Camera::grab(cv::Mat& frame, double& timeMs) {
 
 void Camera::captureLoop() {
     for (;;) {
+        Clock::time_point due;
         if (!live_) {
             // Realtime playback: wait until this frame is due, as a camera would deliver it.
-            const auto due =
-                start_ +
-                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                    std::chrono::duration<double, std::milli>(frameCount_ * 1000.0 / fps_));
+            due = start_ +
+                  std::chrono::duration_cast<Clock::duration>(
+                      std::chrono::duration<double, std::milli>(frameCount_ * 1000.0 / fps_));
             std::unique_lock<std::mutex> lock(mutex_);
             if (changed_.wait_until(lock, due, [this] { return stop_; })) return;
         }
         cv::Mat frame;  // a new buffer each time, so the frame handed out is never overwritten
         double timeMs = 0;
         const bool ok = grab(frame, timeMs);
+        const Clock::time_point capturedAt = live_ ? Clock::now() : due;
 
         std::lock_guard<std::mutex> lock(mutex_);
         if (stop_) return;
@@ -79,20 +80,29 @@ void Camera::captureLoop() {
         if (fresh_) ++dropped_;
         latest_ = frame;
         latestMs_ = timeMs;
+        latestAt_ = capturedAt;
         fresh_ = true;
         changed_.notify_all();
     }
 }
 
 bool Camera::read(cv::Mat& frame, double& timeMs) {
-    if (!threaded_) return grab(frame, timeMs);
+    if (!threaded_) {
+        readAt_ = Clock::now();
+        return grab(frame, timeMs);
+    }
     std::unique_lock<std::mutex> lock(mutex_);
     changed_.wait(lock, [this] { return fresh_ || ended_ || stop_; });
     if (!fresh_) return false;
     frame = latest_;
     timeMs = latestMs_;
+    readAt_ = latestAt_;
     fresh_ = false;
     return true;
+}
+
+double Camera::frameAgeMs() const {
+    return std::chrono::duration<double, std::milli>(Clock::now() - readAt_).count();
 }
 
 long long Camera::dropped() const {
