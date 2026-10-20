@@ -62,6 +62,7 @@ if(GTest_FOUND)
         tests/LabelsTest.cpp
         tests/OptionsTest.cpp
         tests/OrtModelTest.cpp
+        tests/OverlayTest.cpp
         tests/TagLayoutTest.cpp
         tests/TargetingTest.cpp
         tests/TrackerTest.cpp

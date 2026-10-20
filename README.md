@@ -38,14 +38,15 @@ ctest --test-dir build           # unit tests (needs googletest)
 ./build/tracker --video clips/hands_face.mov --no-window   # headless: just the log and a summary
 ./build/tracker --video clips/hands_face.mov --realtime    # play at camera speed, skipping frames when busy
 ./build/tracker --backend cpu                             # don't use CoreML
-./build/tracker --debug                                   # show light ratios and label scores
+./build/tracker --debug                                   # show confidences, light ratios, label scores and timings
 ./build/tracker --record clips/new.mov                    # also save the raw camera feed
 ./build/tracker --conf-hand 0.5                           # per-detector thresholds: --conf-yolo/-face/-hand
 ./build/tracker --list-classes
 ./build/tracker --help                   # all options
 ```
-Keys: `p` pause/resume, `t` trails on/off, `d` debug view on/off, `q` or `Esc` quit. Ctrl-C in the terminal also stops cleanly.
-Thin boxes are predictions: the object wasn't detected in that frame, and the tracker is keeping its box going.
+Keys: `p` pause/resume, `t` trails on/off, `d` debug view on/off, `h` help, `q` or `Esc` quit. Ctrl-C in the terminal also stops cleanly.
+The panel in the top-left corner shows the frame rate, how many of each class are tracked, and which modes are on.
+Boxes drawn with only their corners are predictions: the object hasn't been detected for a few frames, and the tracker is keeping its box going.
 The first camera run asks for camera access: allow it for your terminal app in **System Settings → Privacy & Security → Camera**.
 
 At startup it prints where each detector runs. CoreML compiles a model on first use (a few seconds) and
@@ -89,7 +90,8 @@ To tune the tracker without re-running the neural networks, save a clip's detect
 src/        Camera (capture thread); ClassRegistry (all class ids); Detector runs the IDetector
             implementations (YoloDetector, FaceDetector, HandDetector) side by side; OrtModel
             (ONNX Runtime + CoreML); Tracker (+ KalmanBox, Assignment); Targeting (TARGET);
-            Embedder, Labels, Enrollment, Recognizer (custom labels); Options; Overlay; Logger; main
+            Embedder, Labels, Enrollment, Recognizer (custom labels); Options; Overlay
+            (+ TagLayout); Logger; main
 labels/     custom labels: photos + label.yml per label (not in git)
 tools/      replay.cpp: the tracker on saved detections (tracker_replay)
 tests/      GoogleTest unit tests (tracker_tests)

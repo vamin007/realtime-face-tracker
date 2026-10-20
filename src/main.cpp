@@ -288,6 +288,10 @@ int main(int argc, char** argv) try {
     draw.debug = opt.debug;
     draw.targeting = opt.targeting ? &targeting : nullptr;
     draw.recognizer = recognizer.get();
+    Overlay overlay;
+    cv::Mat raw;  // the frame before drawing, to redraw it while paused
+    double drawMs = 0;
+    auto uptime = [&] { return std::chrono::duration<double>(Clock::now() - start).count(); };
     // Running totals for the summary at the end.
     double detectMsTotal = 0, drawMsTotal = 0;
     std::map<std::string, double> detectorMsTotal;
@@ -343,12 +347,13 @@ int main(int argc, char** argv) try {
         lastFrame = now;
         fps = fps == 0.0 ? instant : 0.9 * fps + 0.1 * instant;
 
-        int visible = 0;
-        for (const Track& t : *shown) visible += isVisible(t);
+        FrameInfo info{fps, detector.timings(), drawMs, tMs / 1000.0, uptime()};
+        info.recording = recorder.isOpened();
+        if (opt.window) frame.copyTo(raw);
         const auto d0 = Clock::now();
-        drawTracks(frame, *shown, classes, draw);
-        drawHud(frame, {fps, detector.timings(), visible});
-        drawMsTotal += std::chrono::duration<double, std::milli>(Clock::now() - d0).count();
+        overlay.draw(frame, *shown, classes, draw, info);
+        drawMs = std::chrono::duration<double, std::milli>(Clock::now() - d0).count();
+        drawMsTotal += drawMs;
         if (!opt.saveFrames.empty() && frameIndex % opt.saveEvery == 0) {
             char name[32];
             std::snprintf(name, sizeof(name), "/frame_%06lld.jpg", frameIndex);
@@ -357,12 +362,18 @@ int main(int argc, char** argv) try {
         if (opt.window) {
             cv::imshow(window, frame);
             int key = cv::waitKey(1);
-            if (key == 'p') {  // pause: keep this frame on screen until p again
-                do key = cv::waitKey(50);
-                while (key != 'p' && key != 'q' && key != 27 && !gStop);
+            if (key == 'p') {  // pause on this frame until p again; t, d and h still work
+                info.paused = true;
+                do {
+                    applyViewKey(key, draw);
+                    raw.copyTo(frame);
+                    info.uptime = uptime();
+                    overlay.draw(frame, *shown, classes, draw, info);
+                    cv::imshow(window, frame);
+                    key = cv::waitKey(50);
+                } while (key != 'p' && key != 'q' && key != 27 && !gStop);
             }
-            if (key == 't') draw.trails = !draw.trails;
-            if (key == 'd') draw.debug = !draw.debug;
+            applyViewKey(key, draw);
             if (key == 27 || key == 'q') break;
         }
         ++frameIndex;

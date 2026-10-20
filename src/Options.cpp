@@ -69,7 +69,7 @@ void printUsage() {
            "  --no-window           don't show a window (video files only)\n"
            "  --no-mirror           don't flip the camera image horizontally\n"
            "  --show-trail          draw a motion trail behind each track\n"
-           "  --debug               show brightness and recognition details on the boxes\n"
+           "  --debug               show confidence, brightness, recognition details and timings\n"
            "  --record PATH         save the raw camera feed as a video (e.g. clips/new.mov)\n"
            "  --no-log              don't write a CSV log\n"
            "\nDetection:\n"
@@ -108,7 +108,7 @@ void printUsage() {
            "  --save-every N            with --save-frames: every Nth frame (default 30)\n"
            "  --sequential              run the detectors one after another\n"
            "  --face-width N            width faces are detected at (default 640, 0 = full)\n"
-           "\nKeys: p pause/resume, t trails on/off, d debug view on/off, q or Esc quit.\n";
+           "\nKeys: p pause/resume, t trails on/off, d debug view on/off, h help, q or Esc quit.\n";
 }
 
 bool parseArgs(const std::vector<std::string>& args, Options& opt) {
