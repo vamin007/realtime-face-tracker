@@ -32,6 +32,7 @@ add_library(tracker_core STATIC
     src/Enrollment.cpp
     src/Options.cpp
     src/Overlay.cpp
+    src/TagLayout.cpp
     src/Logger.cpp
 )
 target_include_directories(tracker_core PUBLIC src)
@@ -61,6 +62,7 @@ if(GTest_FOUND)
         tests/LabelsTest.cpp
         tests/OptionsTest.cpp
         tests/OrtModelTest.cpp
+        tests/TagLayoutTest.cpp
         tests/TargetingTest.cpp
         tests/TrackerTest.cpp
     )
