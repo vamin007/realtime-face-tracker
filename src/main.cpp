@@ -289,7 +289,7 @@ int main(int argc, char** argv) try {
     draw.targeting = opt.targeting ? &targeting : nullptr;
     draw.recognizer = recognizer.get();
     // Running totals for the summary at the end.
-    double detectMsTotal = 0;
+    double detectMsTotal = 0, drawMsTotal = 0;
     std::map<std::string, double> detectorMsTotal;
     std::vector<Track> filtered;
 
@@ -345,8 +345,10 @@ int main(int argc, char** argv) try {
 
         int visible = 0;
         for (const Track& t : *shown) visible += isVisible(t);
+        const auto d0 = Clock::now();
         drawTracks(frame, *shown, classes, draw);
         drawHud(frame, {fps, detector.timings(), visible});
+        drawMsTotal += std::chrono::duration<double, std::milli>(Clock::now() - d0).count();
         if (!opt.saveFrames.empty() && frameIndex % opt.saveEvery == 0) {
             char name[32];
             std::snprintf(name, sizeof(name), "/frame_%06lld.jpg", frameIndex);
@@ -378,6 +380,7 @@ int main(int argc, char** argv) try {
             sep = ", ";
         }
         std::printf(")\n");
+        std::printf("Drawing per frame: %.2f ms\n", drawMsTotal / frameIndex);
     }
     if (camera.dropped() > 0)
         std::printf("Skipped %lld frames that arrived while busy\n", camera.dropped());
