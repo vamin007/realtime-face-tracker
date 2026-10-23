@@ -223,6 +223,22 @@ TEST_F(LabelSync, BadFoldersAreReportedNotLoaded) {
     EXPECT_TRUE(library.labels().empty());
 }
 
+TEST_F(LabelSync, FoldersThatCantBeLabelsDontCallForASync) {
+    photo(fs::path(dir) / "mug" / "a.png", 10);
+    LabelLibrary library(dir);
+    library.load();
+    sync(library);
+    photo(fs::path(dir) / "my mug" / "a.png", 10);  // a bad name
+    photo(fs::path(dir) / "cup2" / "a.png", 10);
+    std::ofstream(fs::path(dir) / "cup2" / "label.yml") << "clas: cup\n";  // a bad label.yml
+    library.load();
+    EXPECT_FALSE(library.needsSync()) << "no photos changed, and a sync can't fix them";
+
+    photo(fs::path(dir) / "mug" / "b.png", 60);
+    library.load();
+    EXPECT_TRUE(library.needsSync());
+}
+
 TEST_F(LabelSync, EnrollCopiesPhotosIntoTheFolderOnce) {
     const fs::path source = root / "photos";
     photo(source / "a.png", 10);

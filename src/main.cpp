@@ -228,6 +228,7 @@ int main(int argc, char** argv) try {
     // Photos added to label folders since the last run are looked at now, with
     // every detector (so not when one is turned off or didn't load: the labels
     // then stay as the last sync left them).
+    bool synced = false;
     if (opt.labels && library.needsSync()) {
         std::vector<std::string> failed;  // missing, and not turned off
         for (const std::string& name : missing)
@@ -235,6 +236,7 @@ int main(int argc, char** argv) try {
                 failed.push_back(name);
         if (missing.empty()) {
             syncLabels(library, detector, classes, embedders, false);
+            synced = true;
         } else if (!failed.empty()) {
             std::cout << "Label photos changed, but weren't looked at: " << detectorNames(failed)
                       << " didn't load (see the warning above). Labels not updated.\n";
@@ -245,6 +247,12 @@ int main(int argc, char** argv) try {
                          "look at them.\n";
         }
     }
+    // Folders that can't be labels (a bad name or label.yml): a sync can't fix
+    // them, so they're only reported (a sync reports them itself).
+    if (opt.labels && !synced)
+        for (const LabelFolder& f : library.folders())
+            if (!f.problem.empty())
+                std::cout << "Label '" << f.name << "' can't be used: " << f.problem << '\n';
     registerLabels(library, classes);
 
     std::cout << "Detectors (" << (opt.parallel ? "side by side" : "one after another") << "):\n";

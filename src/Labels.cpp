@@ -406,7 +406,7 @@ int LabelLibrary::findFolder(const std::string& name) const {
 
 bool LabelLibrary::needsSync() const {
     return std::any_of(folders_.begin(), folders_.end(),
-                       [](const LabelFolder& f) { return !f.problem.empty() || !f.plan.empty(); });
+                       [](const LabelFolder& f) { return f.problem.empty() && !f.plan.empty(); });
 }
 
 bool LabelLibrary::hasLabelsFor(const std::string& baseClass) const {

@@ -114,7 +114,9 @@ public:
 
     const std::vector<LabelFolder>& folders() const { return folders_; }
     int findFolder(const std::string& name) const;  // -1 if there's no such folder
-    bool needsSync() const;  // photos were added, changed or removed since the last sync
+    // Photos were added, changed or removed since the last sync (or a label's
+    // settings changed). Folders with a problem don't count: a sync can't fix them.
+    bool needsSync() const;
     // Photos lying directly in dir, outside any label folder.
     const std::vector<std::string>& loosePhotos() const { return loosePhotos_; }
 
