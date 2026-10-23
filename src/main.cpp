@@ -359,7 +359,7 @@ int main(int argc, char** argv) try {
         lastFrame = now;
         fps = fps == 0.0 ? instant : 0.9 * fps + 0.1 * instant;
 
-        FrameInfo info{fps, detector.timings(), drawMs, tMs / 1000.0, uptime()};
+        FrameInfo info{fps, detector.timings(), drawMs, uptime()};
         info.recording = recorder.isOpened();
         if (opt.window) frame.copyTo(raw);
         const auto d0 = Clock::now();
