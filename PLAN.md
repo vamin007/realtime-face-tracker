@@ -11,12 +11,13 @@ Measured on the reference clips, with everything on:
 | Face IDs | 7 (shown as "person") | 1 per clip |
 | TARGET on flashlight episodes | — | 10 / 10, each within 0.2 s; none in `hands_face.mov` |
 | Custom labels (photos from the clips) | — | face recognized in 99% of frames, phone in 75% |
-| Unit tests | 0 | 71 |
+| Unit tests | 0 | 118 (71 on 2026-10-17) |
 
 Added on 2026-10-20 and merged into `v2` (details in the sections below):
 - **Lag and flicker** (`v2-tracking`): boxes on fast-moving hands trail their detection by 4.0–4.4% of the box size instead of 8.8–11.4%, and switch to a thin (predicted) box 24 times a minute instead of 57 on `hands_face`. Hand IDs, 30 FPS and the label rates are unchanged.
 - **Label database** (`v2-labels-db`, under M5): each label is a folder of photos in `labels/`, synced at startup. 17 new unit tests (88 on that branch).
 - **UI polish** (`v2-ui`): a new overlay with tags kept off each other, corner-only predicted boxes, a TARGET LOCKED badge, a HUD panel and `h` for help. Drawing takes about 0.2 ms per frame (0.5 ms with the debug view and trails).
+- **Review fixes** (2026-10-23, `fix-*` branches): a label sync runs only when the YOLO, face and hand detectors all loaded; one bad photo no longer stops a sync or startup (a failure that may be temporary is tried again next time); `TARGET` is a reserved label name; folders with problems are reported at startup without a sync; `grab_frames --crop hand` works.
 
 Still to do by the user, with the live camera (no clip covers these):
 - a live run: camera capture runs on a background thread now;
@@ -347,7 +348,7 @@ Not checked: no live-window run of this round is recorded. The keys, the paused 
 - **CoreML may not run every layer.** Unsupported layers (more likely in DINOv2's transformer) fall back to the CPU. The startup list of where each detector runs, the detector times in the debug view (`d`) and the end-of-run summary show it, and `--backend cpu` can be used for comparison. (As built, a model runs on CoreML only if CoreML takes all of it; see M2.)
 - **The YOLO re-export needs Python `ultralytics`** in `.venv`. If that's not wanted, YOLO stays at 640×640 with some speed lost.
 - **Model sources:** checked 2026-10-15. DINOv2-small ONNX is at Hugging Face `onnx-community/dinov2-small` (`onnx/model.onnx`, 88.5 MB), and SFace is in `opencv_zoo`. The fallback for DINOv2 is MobileNetV3.
-- **Webcam auto-exposure** shifts brightness. The ratio-based design handles most of it, and the thresholds will be tuned on `flashlight.mp4`.
+- **Webcam auto-exposure** shifts brightness. The ratio-based design handles most of it, and the thresholds will be tuned on `flashlight.mov`.
 - **CoreML's first model compile** can take seconds. The compiled-model cache directory avoids repeating it.
 
 ## Baseline (M0, measured 2026-10-17)
@@ -375,6 +376,6 @@ Logs: `logs/run_20261017_182032.csv`, `logs/run_20261017_182256.csv` (not in git
   - `hands_face.mov`: total confirmed IDs down ≥ 75% from the M0 baseline on the same clip, at most 2 IDs per hand that's in view, and face and hand counted as separate types. For reference, an earlier live run gave 2 hands 18 IDs.
   - `flashlight.mov`: TARGET appears within 0.2 s of light-on and clears within 0.5 s of light-off. The `cell phone` track (the light source) and the chair are never targeted.
 - **Live checks:**
-  - ≥ 25 FPS with all detectors on, **and still ≥ 25 FPS with custom labels enrolled** (recognition shares the GPU). The startup list shows YOLO on CoreML (the HUD doesn't show the backend).
+  - ≥ 25 FPS with all detectors on, **and still ≥ 25 FPS with custom labels enrolled** (as built, recognition runs on the CPU; see M5). The startup list shows YOLO on CoreML (the HUD doesn't show the backend).
   - Turning room lights on and off produces no TARGET.
   - After enrolling a mug from 5 photos, it shows as `my_mug` while a different cup stays `cup #N`. This holds with and without `--no-mirror`.
