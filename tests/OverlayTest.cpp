@@ -107,7 +107,6 @@ TEST_F(OverlayTest, OnlyTheTargetIsRed) {
     run(6);
     ASSERT_TRUE(targeting.target().active());
     options.targeting = &targeting;
-    info.time = now;
     frame = empty.clone();
     overlay.draw(frame, crowd(), classes, options, info);
     const cv::Rect around(460, 100, 360, 440);  // the face's box, its marks and its tag

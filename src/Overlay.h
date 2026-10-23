@@ -16,7 +16,6 @@ struct FrameInfo {
     double fps = 0;
     std::vector<Detector::Timing> timings;  // per detector, this frame (debug view)
     double drawMs = 0;                      // drawing the last frame's overlay (debug view)
-    double time = 0;                        // the frame's time, s (the tracker's clock)
     double uptime = 0;                      // s since start, for animations and the "h: help" hint
     bool paused = false;
     bool recording = false;
