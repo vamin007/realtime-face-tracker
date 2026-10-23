@@ -144,6 +144,17 @@ protected:
     TestEmbedders embedders;
 };
 
+// The message of the error f() throws; empty if it doesn't throw.
+template <typename F>
+std::string errorOf(F f) {
+    try {
+        f();
+    } catch (const std::exception& e) {
+        return e.what();
+    }
+    return "";
+}
+
 }  // namespace
 
 TEST_F(LabelSync, NewFolderBecomesALabelAndUnchangedPhotosAreNotLookedAtAgain) {
@@ -348,6 +359,40 @@ TEST_F(LabelSync, BadFoldersAreReportedNotLoaded) {
     EXPECT_EQ(library.loosePhotos(), std::vector<std::string>{"loose.png"});
     sync(library);
     EXPECT_TRUE(library.labels().empty());
+}
+
+TEST_F(LabelSync, TargetIsReservedForTheRedTargetBox) {
+    const fs::path source = root / "photos";
+    photo(source / "a.png", 10);
+    const std::vector<std::string> photos = {(source / "a.png").string()};
+    LabelLibrary library(dir);
+    library.load();
+    for (const char* name : {"TARGET", "target", "Target"}) {
+        const std::string error = errorOf(
+            [&] { enroll(name, "", photos, false, detector, classes, embedders, library); });
+        EXPECT_NE(error.find("TARGET is reserved"), std::string::npos) << name << ": " << error;
+    }
+    EXPECT_TRUE(fs::is_empty(dir)) << "no folder made";
+
+    enroll("lamp", "", photos, false, detector, classes, embedders, library);
+    const std::string error = errorOf([&] { renameLabel("lamp", "Target", library, classes); });
+    EXPECT_NE(error.find("TARGET is reserved"), std::string::npos) << error;
+    EXPECT_TRUE(fs::exists(fs::path(dir) / "lamp"));
+
+    // A folder made by hand is reported, not loaded, and can be renamed.
+    photo(fs::path(dir) / "TARGET" / "a.png", 60);
+    library.load();
+    const int f = library.findFolder("TARGET");
+    ASSERT_GE(f, 0);
+    EXPECT_NE(library.folders()[f].problem.find("TARGET is reserved"), std::string::npos);
+    EXPECT_NE(library.folders()[f].problem.find("rename the folder"), std::string::npos);
+    sync(library);
+    ASSERT_EQ(library.labels().size(), 1u);
+    EXPECT_EQ(library.labels()[0].name, "lamp");
+    renameLabel("TARGET", "torch", library, classes);
+    library.load();
+    sync(library);
+    EXPECT_GE(library.find("torch"), 0);
 }
 
 TEST_F(LabelSync, EnrollCopiesPhotosIntoTheFolderOnce) {

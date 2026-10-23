@@ -435,9 +435,8 @@ void enroll(const std::string& name, const std::string& classHint,
             const std::vector<std::string>& images, bool wholePhoto, Detector& detector,
             const ClassRegistry& classes, Embedders& embedders, LabelLibrary& library,
             bool mustExist) {
-    if (!validLabelName(name))
-        throw std::runtime_error("Label names may only use letters, digits, _ and -: '" + name +
-                                 "'");
+    if (const std::string why = labelNameProblem(name); !why.empty())
+        throw std::runtime_error("'" + name + "' can't be a label name: " + why);
     const ClassId sameName = classes.find(name);
     if (sameName >= 0 && classes.kind(sameName) != ClassKind::Custom)
         throw std::runtime_error("'" + name + "' is already a class name; pick another label name");
@@ -550,8 +549,8 @@ void renameLabel(const std::string& from, const std::string& to, const LabelLibr
                  const ClassRegistry& classes) {
     if (library.findFolder(from) < 0)
         throw std::runtime_error("No label named '" + from + "' (see --list-labels)");
-    if (!validLabelName(to))
-        throw std::runtime_error("Label names may only use letters, digits, _ and -: '" + to + "'");
+    if (const std::string why = labelNameProblem(to); !why.empty())
+        throw std::runtime_error("'" + to + "' can't be a label name: " + why);
     const ClassId sameName = classes.find(to);
     if (sameName >= 0 && classes.kind(sameName) != ClassKind::Custom)
         throw std::runtime_error("'" + to + "' is already a class name; pick another label name");

@@ -56,12 +56,18 @@ bool readFlag(const cv::FileNode& node, const std::string& file) {
 
 }  // namespace
 
-bool validLabelName(const std::string& name) {
-    if (name.empty() || name.size() > 40) return false;
-    return std::all_of(name.begin(), name.end(), [](char c) {
+std::string labelNameProblem(const std::string& name) {
+    auto allowed = [](char c) {
         return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-';
-    });
+    };
+    if (name.empty() || name.size() > 40 || !std::all_of(name.begin(), name.end(), allowed))
+        return "label names may only use letters, digits, _ and -";
+    // Labeled tracks show the label's name, and a TARGET tag would pass for the target.
+    if (lower(name) == "target") return "TARGET is reserved for the red TARGET box";
+    return "";
 }
+
+bool validLabelName(const std::string& name) { return labelNameProblem(name).empty(); }
 
 float labelScore(const CustomLabel& label, const Embedding& e) {
     std::vector<float> sims;
@@ -329,9 +335,8 @@ void LabelLibrary::load() {
         f.name = path.filename().string();
         f.path = path.string();
         try {
-            if (!validLabelName(f.name))
-                throw std::runtime_error(
-                    "label names may only use letters, digits, _ and -; rename the folder");
+            if (const std::string why = labelNameProblem(f.name); !why.empty())
+                throw std::runtime_error(why + "; rename the folder");
             migrateOldLabel(f.path);
             f.settings = readSettings((path / kSettingsFile).string());
         } catch (const std::exception& e) {
