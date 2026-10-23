@@ -32,6 +32,14 @@ TEST(Labels, NamesAreSafeForFoldersAndClasses) {
     EXPECT_FALSE(validLabelName("a,b"));
 }
 
+TEST(Labels, TargetIsNotALabelNameInAnyCase) {
+    EXPECT_FALSE(validLabelName("TARGET")) << "the red box's tag";
+    EXPECT_FALSE(validLabelName("target"));
+    EXPECT_FALSE(validLabelName("Target"));
+    EXPECT_TRUE(validLabelName("target2"));
+    EXPECT_TRUE(validLabelName("my_target"));
+}
+
 TEST(Labels, ScoreIsTheMeanOfTheThreeBestSamples) {
     const CustomLabel label = makeLabel(
         "x", "cup",

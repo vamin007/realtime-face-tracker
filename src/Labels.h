@@ -137,7 +137,9 @@ private:
 float labelScore(const CustomLabel& label, const Embedding& e);
 
 // Label names become class names, so they're limited to letters, digits, _ and -.
+// TARGET, in any case, is the red box's tag, so it isn't a label name.
 bool validLabelName(const std::string& name);
+std::string labelNameProblem(const std::string& name);  // why it isn't valid; empty if it is
 
 // Files in a label's folder.
 constexpr const char* kSettingsFile = "label.yml";

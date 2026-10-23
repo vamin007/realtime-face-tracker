@@ -58,7 +58,7 @@ it runs on the CPU, which was faster for the partly supported palm model.
 ## Custom labels
 Teach it a specific item, such as your mug or a person's face, from a few photos. Each label is a folder of photos in `labels/`:
 
-1. Make a folder named after the item, e.g. `labels/my_mug/` (letters, digits, `_` and `-`).
+1. Make a folder named after the item, e.g. `labels/my_mug/` (letters, digits, `_` and `-`; not `TARGET`, which is the red box's tag).
 2. Put **5–10 photos** of it there, from different angles and in different light. JPEG and PNG work; convert iPhone HEIC photos first (`sips -s format jpeg IMG_1234.heic --out IMG_1234.jpg`).
 3. Run the tracker. At startup it looks at new, changed and removed photos, says for each one whether it found the item, and warns about anything that would hurt recognition.
 
