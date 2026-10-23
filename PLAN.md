@@ -13,8 +13,14 @@ Measured on the reference clips, with everything on:
 | Custom labels (photos from the clips) | — | face recognized in 99% of frames, phone in 75% |
 | Unit tests | 0 | 71 |
 
+Added on 2026-10-20 and merged into `v2` (details in the sections below):
+- **Lag and flicker** (`v2-tracking`): boxes on fast-moving hands trail their detection by 4.0–4.4% of the box size instead of 8.8–11.4%, and switch to a thin (predicted) box 24 times a minute instead of 57 on `hands_face`. Hand IDs, 30 FPS and the label rates are unchanged.
+- **Label database** (`v2-labels-db`, under M5): each label is a folder of photos in `labels/`, synced at startup. 17 new unit tests (88 on that branch).
+- **UI polish** (`v2-ui`): a new overlay with tags kept off each other, corner-only predicted boxes, a TARGET LOCKED badge, a HUD panel and `h` for help. Drawing takes about 0.2 ms per frame (0.5 ms with the debug view and trails).
+
 Still to do by the user, with the live camera (no clip covers these):
 - a live run: camera capture runs on a background thread now;
+- the UI polish overlay in a live window: the keys, pausing, the help panel, the pulsing TARGET corners;
 - enrolling a real object from 5–10 photos;
 - telling two different items of the same class apart.
 
@@ -56,7 +62,7 @@ Capture thread ──latest frame──▶ Main loop (per frame)
                                   └─ Overlay + HUD │ Logger (CSV) │ Recorder (optional)
 ```
 
-Layout: `src/{app,core,io,infer,detect,track,recog,target,ui}/`, plus `tests/`, `scripts/`, `labels/` and `clips/`.
+Layout: `src/{app,core,io,infer,detect,track,recog,target,ui}/`, plus `tests/`, `scripts/`, `labels/` and `clips/`. (As built, `src/` stayed flat, and `tools/` holds `replay.cpp` and `grab_frames.cpp`; see the README's Layout.)
 
 ## Milestones
 Each milestone builds, runs and gets its own git commit.
@@ -77,7 +83,7 @@ Each milestone builds, runs and gets its own git commit.
 ### M1: Detection rebuild and separate face/hand objects
 - `Detection.h` in its own header: box, class, confidence, which detector produced it, and keypoints (face landmarks are needed for recognition in M5). This breaks the circular include between `Detector.h` and `FaceDetector.h`/`HandDetector.h`.
 - `ClassRegistry` is the one place class IDs come from: the 80 COCO classes (put `coco.names` back to 80 lines), built-in `face` and `hand`, and custom labels added at runtime. Name lookups are bounds-checked, which fixes the out-of-bounds read at `Logger.cpp:30`.
-- An `IDetector` interface implemented by `YoloDetector`, `FaceDetector` and `HandDetector`. A `DetectorSet` runs the enabled ones and applies the class filter.
+- An `IDetector` interface implemented by `YoloDetector`, `FaceDetector` and `HandDetector`. A `DetectorSet` (built as `Detector`) runs the enabled ones and applies the class filter.
 - **Remove `personByFace` completely:** `person` is the YOLO body box, `face` is its own type, `hand` is its own type.
 - The palm box is enlarged to a hand box. It's expanded about 2.5× toward the fingers, using the wrist → middle-finger keypoints the palm model already outputs (its 18 outputs per box are 4 box values plus 7 keypoints). This is the same approach as MediaPipe.
 - Thresholds per detector: `--conf-yolo 0.4`, `--conf-face 0.6`, `--conf-hand 0.6`; `--conf` sets all three. Each detector also returns low-score detections (≥0.1) for M3's second matching pass.
@@ -93,13 +99,13 @@ Each milestone builds, runs and gets its own git commit.
 
 Original plan:
 - **Concept: CoreML execution provider.** ONNX Runtime can hand a model to Apple's CoreML, which runs it on the M1 Pro's GPU or Neural Engine instead of the CPU.
-- `brew install onnxruntime` (the formula builds with CoreML on macOS; header `onnxruntime/coreml_provider_factory.h`). An `OrtSession` wrapper tries CoreML first and falls back to CPU, and prints the backend it picked. CoreML's compiled model is cached so restarts are fast. Flag: `--backend coreml|cpu`.
+- `brew install onnxruntime` (the formula builds with CoreML on macOS; header `onnxruntime/coreml_provider_factory.h`). An `OrtSession` wrapper (built as `OrtModel`) tries CoreML first and falls back to CPU, and prints the backend it picked. CoreML's compiled model is cached so restarts are fast. Flag: `--backend coreml|cpu`.
 - YOLO and the palm model move to ONNX Runtime. YuNet stays on OpenCV's `FaceDetectorYN` but runs on a 640×360 downscale, and boxes are scaled back up.
 - YOLO is re-exported at **640×384** instead of 640×640. A 16:9 frame then wastes almost no compute on padding (about 40% less work). The decoder reads the input size from the model.
 - **Capture thread:** it always holds the newest frame, so camera waits never block processing.
 - **Detectors run in parallel** (`std::async`, joined each frame), so time per frame is the slowest detector rather than the sum of all three. `cv::setNumThreads` is tuned so the threads don't compete for cores.
 - Fallback flag `--detect-every N`: frames in between use Kalman predictions only.
-- HUD and `--stats` show milliseconds per stage and FPS. `--benchmark` runs a clip and prints averages.
+- HUD and `--stats` show milliseconds per stage and FPS. `--benchmark` runs a clip and prints averages. (As built: the HUD shows FPS, and the detector and drawing times only in the debug view, `d`. The summary every run prints at the end has the time per stage.)
 
 ### M3: Tracker rebuild (stable IDs, numbers per type)
 **Done 2026-10-17.** Confirmed IDs with the full program (same clips as the baseline):
@@ -142,7 +148,7 @@ Original plan:
   - A number is assigned **when a track is confirmed**, so 1–3-frame noise tracks don't use up numbers.
   - Numbers are never reused within a run.
   - If a track's voted class changes for good (e.g. it settles on `laptop` after starting as `tv`), it gets the next number in the new type. The old number is not handed out again.
-  - `uid` stays unique for the whole run and goes into the logs.
+  - `uid` (built as `Track::id`, the log's `id` column) stays unique for the whole run and goes into the logs.
 - `Track` becomes move-only, which removes the trap where a copy shares the Kalman filter's matrices. Confidence is smoothed before display.
 
 ```cpp
@@ -162,6 +168,7 @@ struct Track {
     Track(Track&&) = default;
 };
 ```
+As built (`src/Tracker.h`): `id` and `classId` instead of `uid` and `cls`, and flags (`confirmed`, `visible`, `matched`, `coasting`) instead of `TrackState`. Label votes and the target are kept in `Recognizer` and `TargetSelector`, not on the track.
 
 ### M4: Bright-light face targeting
 **Done 2026-10-17.** On `flashlight.mov`, all 10 times the light hit the face became TARGET episodes. Each turned on within 0.2 s and released about 0.25 s after the light went off. The phone (the light source) and the chair were never targeted. On `hands_face.mov` there were no targets. Measured and changed from the plan:
@@ -193,13 +200,14 @@ Original plan:
   - Both are timed in seconds rather than frames. Thresholds are tuned on `flashlight.mov`.
 - **Brightest only:** of the faces that qualify, the highest ratio wins. The current target keeps it unless another face beats it by 0.2.
 - **Overexposure:** a strongly lit face can stop being detected. The target box then keeps following the Kalman prediction for up to 0.5 s while that region stays bright. (In the baseline, the face track survived the whole flashlight clip, so this is a safety net.)
-- **Display:** the box is red and 3 px thick, and the label is exactly `TARGET`. Normal track colors **skip red hues** (`colorForId` in `Overlay.cpp`), so red only ever means TARGET.
+- **Display:** the box is red and 3 px thick, and the label is exactly `TARGET`. Normal track colors **skip red hues** (`trackColor` in `Overlay.cpp`, called `colorForId` before the UI polish round), so red only ever means TARGET.
 - Flags: `--no-targeting`, `--target-ratio` (default 1.6), `--target-rise` (default 1.5).
 
 ```cpp
 struct FaceLight   { float normalRatio = 0; float ratio = 0; double firstSeen = 0; };  // per face track uid
 struct TargetState { int trackUid = -1; double conditionSince = 0, releaseSince = 0, coastUntil = 0; };
 ```
+As built (`src/Targeting.h`): `FaceLight` is kept per face track `id`, with more fields, and `Target` (track id, box, ratio, rise) takes the place of `TargetState`. The timers are members of `TargetSelector`.
 
 ### M5: Custom labels
 **Done 2026-10-17.** Tested with frames from the clips as photos (kept outside the project):
@@ -239,7 +247,7 @@ class  LabelLibrary  { load(dir); enroll(...); match(baseClass, emb) -> LabelMat
   3. Embeds each crop and saves `label.yml` with OpenCV's `FileStorage`, tagged with the embedding model version so a stale cache is recomputed.
   4. Also stores an embedding of each crop **flipped left-to-right**. The live camera image is mirrored but photos aren't, so a mug's logo appears reversed on screen. Storing both directions keeps recognition from depending on the mirror setting.
   5. Reports how consistent the samples are and flags photos that don't fit. Five to ten photos from different angles and lighting are recommended.
-- Other commands: `--list-labels`, `--remove-label`, `--reembed`.
+- Other commands: `--list-labels`, `--remove-label`, `--reembed`. (`--reembed` wasn't built. With the label database, a sync redoes a label's photos when the embedding model or its settings change.)
 - **At runtime:**
   - A confirmed track of a base class is embedded on the worker thread, at most 2 crops per frame. Each track is re-checked about every 0.5 s or when its size changes a lot.
   - A label's score is the average of its top-3 sample similarities. The best label needs score ≥ threshold **and** a 0.05 lead over the runner-up.
@@ -254,7 +262,7 @@ class  LabelLibrary  { load(dir); enroll(...); match(baseClass, emb) -> LabelMat
 - log with frame time, `matched`, `label`, `target` and `light_ratio`, flushed every second;
 - clean shutdown on Ctrl-C;
 - `--realtime`, the actual camera resolution printed at startup;
-- label text black or white for contrast, HUD timings per detector;
+- label text black or white for contrast, HUD timings per detector (both replaced in the UI polish round, below);
 - keys `p` and `t`.
 
 Added in M6:
@@ -268,9 +276,9 @@ Not done: `--models-dir` (the default paths suffice). `Track` stayed copyable in
 
 Original plan:
 - **CLI:** checked numbers with clear errors, ranges enforced, spaces trimmed in `--classes`, redundant flags removed (`--person-by-face`, `--enable-hands`, `--no-trail`), `--models-dir`.
-- **Logger:** new columns `t_capture_ms,frame,uid,type,number,class,label,state,x,y,w,h,conf,target,light_ratio`. Timestamps are capture time. It flushes every second, and Ctrl-C shuts down cleanly.
+- **Logger:** new columns `t_capture_ms,frame,uid,type,number,class,label,state,x,y,w,h,conf,target,light_ratio`. (As built: `time_ms,frame,id,number,class,label,matched,x,y,w,h,conf,target,light_ratio,coasting`; `coasting` came with the lag and flicker round.) Timestamps are capture time. It flushes every second, and Ctrl-C shuts down cleanly.
 - **Video:** `--realtime` plays at the file's own FPS. `--record out.mp4` saves the raw camera feed for making new test clips.
-- **Overlay:** label text in black or white depending on the box color. HUD timings per stage. Keys: `p` pause, `t` trails, `d` debug overlay (luma ratios, match scores, lost tracks shown dashed), `q`/ESC quit.
+- **Overlay:** label text in black or white depending on the box color. HUD timings per stage. Keys: `p` pause, `t` trails, `d` debug overlay (luma ratios, match scores, lost tracks shown dashed), `q`/ESC quit. (Replaced in the UI polish round, below: white text on a dark tag with a stripe of the track's color, detector and drawing times only in the debug view, predicted boxes drawn as corners only, and `h` for help. Dashed lost tracks weren't built.)
 - **Camera:** checks the resolution it actually got and prints it.
 - Comments cleaned up (no change-log wording, no unmeasured claims). README updated.
 
@@ -310,9 +318,33 @@ What the measurements showed:
 - Left as is: the coast time (0.2 s). Most remaining gaps are hands gone for over half a second, and a longer
   coast only kept ghost boxes up longer.
 
+### UI polish (2026-10-20, branch `v2-ui`)
+The overlay was rebuilt to read at a glance: tags stay inside the frame and off each other, boxes don't flicker between widths, the TARGET stands out, and debugging numbers moved to the debug view. Drawing time per frame, from the run summary's `Drawing per frame` line (added in this round):
+
+| | Before | After |
+|---|---|---|
+| Drawing per frame | 0.13 ms | about 0.2 ms |
+| ... with the debug view and trails | 0.3 ms | about 0.5 ms |
+
+What changed:
+- `Overlay` (`src/Overlay.{h,cpp}`) replaces `drawTracks`, `drawHud` and `HudInfo`. `Overlay::draw` takes the tracks, `DrawOptions` (trails, debug, help) and a `FrameInfo` (FPS, detector and drawing times, paused, recording), and keeps each tag's place from frame to frame.
+- Text uses OpenCV 5's built-in sans-serif font, at a size that scales with the frame height.
+- Tags: the name in white on a dark translucent plate with a stripe of the track's color (`trackColor`, still never red). This replaces the black-or-white text on a box-colored label. Confidence moved to the debug view, whose details (confidence, light ratio and rise, closest label and score) are extra lines in each tag.
+- `TagLayout` (`src/TagLayout.{h,cpp}`) places the tags. Each tries spots around its box, best first: above the top-left corner, just inside it, the same at the top-right corner, then the bottom corners and further out. Spots are moved inside the frame and, while there is room, kept off earlier tags, the HUD and the TARGET LOCKED badge. The TARGET's tag is placed first, then custom labels', then the oldest tracks'. A tag pushed to a worse spot moves back only after 15 frames there, and only if the better spot has room to spare: quick back-and-forth hops on `hands_face.mov` went from 26 to 2.
+- Boxes: a thin outline with heavier corners. A predicted box (`Track::coasting`: no detection for 0.1 s; the lag and flicker round counts these as "thin") shows only its corners, so one or two missed frames don't change the look.
+- TARGET: a thick red box with pulsing corner marks around it, a red `TARGET` tag, and a "TARGET LOCKED" badge at the top center.
+- HUD: a translucent panel in the top-left corner with FPS, chips for PAUSED, REC, DEBUG and TRAILS, and how many of each class are tracked. Detector and drawing times show only in the debug view (`d`).
+- `h` shows a help panel with the keys and what the red and corner-only boxes mean. A "Press h for help" hint fades out after a few seconds.
+- Trails (`t`) fade and thin with age, and skip the jump when a lost track is found again.
+- While paused (`p`), the frame is redrawn, so PAUSED shows and `t`, `d` and `h` still work. The latency summary leaves out time spent paused.
+- Translucent shapes blend only the pixels they cover.
+- Unit tests: `tests/OverlayTest.cpp` and `tests/TagLayoutTest.cpp`.
+
+Not checked: no live-window run of this round is recorded. The keys, the paused redraw, the help panel and hint, the pulsing TARGET corners and how the tags read on the live camera are unverified. The commit doesn't say which clip the drawing times come from.
+
 ## Risks and fallbacks
 - **CoreML support:** checked 2026-10-15. Homebrew's ONNX Runtime (1.31.0) is built with `-Donnxruntime_USE_COREML=ON` on macOS. `Ort::GetAvailableProviders()` confirms it at startup anyway.
-- **CoreML may not run every layer.** Unsupported layers (more likely in DINOv2's transformer) fall back to the CPU. The per-stage HUD timings will show it, and `--backend cpu` can be used for comparison.
+- **CoreML may not run every layer.** Unsupported layers (more likely in DINOv2's transformer) fall back to the CPU. The startup list of where each detector runs, the detector times in the debug view (`d`) and the end-of-run summary show it, and `--backend cpu` can be used for comparison. (As built, a model runs on CoreML only if CoreML takes all of it; see M2.)
 - **The YOLO re-export needs Python `ultralytics`** in `.venv`. If that's not wanted, YOLO stays at 640×640 with some speed lost.
 - **Model sources:** checked 2026-10-15. DINOv2-small ONNX is at Hugging Face `onnx-community/dinov2-small` (`onnx/model.onnx`, 88.5 MB), and SFace is in `opencv_zoo`. The fallback for DINOv2 is MobileNetV3.
 - **Webcam auto-exposure** shifts brightness. The ratio-based design handles most of it, and the thresholds will be tuned on `flashlight.mp4`.
@@ -339,10 +371,10 @@ Logs: `logs/run_20261017_182032.csv`, `logs/run_20261017_182256.csv` (not in git
     - The whole frame brightening (room light on) → no target.
     - A new face with under 1 s of history → no target.
   - LabelLibrary save/load round trip and the lead rule; ClassRegistry; CLI parsing.
-- **Regression clips** (run with `--video ... --stats`, compared to the M0 baseline):
+- **Regression clips** (run with `--video ... --stats`, compared to the M0 baseline; as built, every run prints the summary and there is no `--stats`):
   - `hands_face.mov`: total confirmed IDs down ≥ 75% from the M0 baseline on the same clip, at most 2 IDs per hand that's in view, and face and hand counted as separate types. For reference, an earlier live run gave 2 hands 18 IDs.
   - `flashlight.mov`: TARGET appears within 0.2 s of light-on and clears within 0.5 s of light-off. The `cell phone` track (the light source) and the chair are never targeted.
 - **Live checks:**
-  - ≥ 25 FPS with all detectors on, **and still ≥ 25 FPS with custom labels enrolled** (recognition shares the GPU). The HUD shows the backend as CoreML.
+  - ≥ 25 FPS with all detectors on, **and still ≥ 25 FPS with custom labels enrolled** (recognition shares the GPU). The startup list shows YOLO on CoreML (the HUD doesn't show the backend).
   - Turning room lights on and off produces no TARGET.
   - After enrolling a mug from 5 photos, it shows as `my_mug` while a different cup stays `cup #N`. This holds with and without `--no-mirror`.
