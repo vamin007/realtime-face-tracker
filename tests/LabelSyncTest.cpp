@@ -9,6 +9,9 @@
 #include <opencv2/imgproc.hpp>
 
 #include "Enrollment.h"
+#include "FaceDetector.h"
+#include "HandDetector.h"
+#include "YoloDetector.h"
 
 namespace fs = std::filesystem;
 
@@ -343,4 +346,34 @@ TEST_F(LabelSync, LabelsFromTheOldFormatAreConvertedAndKeepTheirEmbeddings) {
     LabelLibrary again(dir);
     again.load();  // converted once only
     EXPECT_EQ(again.labels()[0].samples[0].embedding, e1);
+}
+
+// A sync looks for every class in the photos: with a detector missing, photos of
+// its classes would be recorded as showing nothing, for good.
+TEST(SyncDetectors, ASyncNeedsYoloFacesAndHands) {
+    EXPECT_TRUE(missingForSync({"yolo", "face", "hand"}).empty());
+    EXPECT_TRUE(missingForSync({"hand", "face", "yolo"}).empty());
+    EXPECT_EQ(missingForSync({"face", "hand"}), std::vector<std::string>{"yolo"});
+    EXPECT_EQ(missingForSync({"yolo"}), (std::vector<std::string>{"face", "hand"}));
+    EXPECT_EQ(missingForSync({}), (std::vector<std::string>{"yolo", "face", "hand"}));
+}
+
+// The names a sync asks for are the real detectors' names. Loads the models.
+TEST(SyncDetectors, TheRealDetectorsAreEnough) {
+    const std::string models = PROJECT_DIR "/models/";
+    std::string yolo = models + "yolov8n_384x640.onnx";
+    if (!fs::exists(yolo)) yolo = models + "yolov8n.onnx";
+    const std::string face = models + "face_detection_yunet_2023mar.onnx";
+    const std::string hand = models + "palm_detection_mediapipe_2023feb.onnx";
+    for (const std::string& path : {yolo, face, hand})
+        if (!fs::exists(path)) GTEST_SKIP() << "missing " << path;
+    const ClassRegistry classes = ClassRegistry::fromFile(models + "coco.names");
+    const std::string cache = PROJECT_DIR "/.cache/coreml";
+    Detector detector;
+    detector.add(std::make_unique<YoloDetector>(yolo, classes.cocoCount(), DetectorThresholds{0.4f},
+                                                Backend::Cpu, cache));
+    detector.add(std::make_unique<FaceDetector>(face, classes.face(), DetectorThresholds{0.6f}));
+    detector.add(std::make_unique<HandDetector>(hand, classes.hand(), DetectorThresholds{0.6f},
+                                                Backend::Cpu, cache));
+    EXPECT_TRUE(missingForSync(detector.names()).empty());
 }

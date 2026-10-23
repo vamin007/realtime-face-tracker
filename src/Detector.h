@@ -27,6 +27,8 @@ public:
 
     // One line per detector: what it runs on.
     std::vector<std::string> summary() const;
+    // The detectors that loaded, by name ("yolo", "face", "hand").
+    std::vector<std::string> names() const;
 
 private:
     std::vector<std::unique_ptr<IDetector>> detectors_;

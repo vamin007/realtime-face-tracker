@@ -395,6 +395,13 @@ int syncLabels(LabelLibrary& library, Detector& detector, const ClassRegistry& c
     return static_cast<int>(changes.size());
 }
 
+std::vector<std::string> missingForSync(const std::vector<std::string>& loaded) {
+    std::vector<std::string> missing;
+    for (const char* name : {"yolo", "face", "hand"})
+        if (std::find(loaded.begin(), loaded.end(), name) == loaded.end()) missing.push_back(name);
+    return missing;
+}
+
 void enroll(const std::string& name, const std::string& classHint,
             const std::vector<std::string>& images, bool wholePhoto, Detector& detector,
             const ClassRegistry& classes, Embedders& embedders, LabelLibrary& library,

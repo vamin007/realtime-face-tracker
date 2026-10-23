@@ -78,6 +78,7 @@ Teach it a specific item, such as your mug or a person's face, from a few photos
   ```
 - It stores a neural-network *embedding* of the item in each photo, plus a mirrored copy, in the folder's hidden `.embeddings.yml` (SFace for faces, DINOv2 for objects). Only new or changed photos are looked at again.
 - Photos where the item isn't found aren't used. A sync also points out photos that don't look like the rest, labels with fewer than 5 usable photos, and labels of the same class so alike that recognition may mix them up.
+- Photos are looked at with all three detectors (YOLO, faces, hands). If one didn't load, startup leaves the labels as they were and says so, and `--sync-labels`, `--enroll` and `--add-photos` stop with an error, since the photos would be recorded as not showing the item. With `--no-faces` or `--no-hands`, startup leaves new photos for `--sync-labels`.
 - While tracking, objects of a labeled class are checked in the background a few times a second. A track takes the label after 3 matching checks, and each label is one item, so at most one track has it. Label changes are picked up at the next start.
 - Labeled tracks show the label instead of `class #n`. A face under a bright light still shows `TARGET`.
 - Labels made by an earlier version (one `label.yml` with the embeddings) are converted automatically; the old file is kept as `.label-v1.yml`.

@@ -1,9 +1,22 @@
 #include <gtest/gtest.h>
 
+#include "Detector.h"
 #include "HandDetector.h"
 #include "YoloDetector.h"
 
 namespace {
+
+// A detector that finds nothing, known only by its name.
+class NamedDetector : public IDetector {
+public:
+    explicit NamedDetector(const char* name) : name_(name) {}
+    const char* name() const override { return name_; }
+    bool canDetect(ClassId) const override { return false; }
+    std::vector<Detection> detect(const cv::Mat&) override { return {}; }
+
+private:
+    const char* name_;
+};
 
 // Builds a fake YOLOv8 output [1, 4 + classes, boxes] from (cx, cy, w, h, class, score).
 struct FakeBox {
@@ -98,4 +111,12 @@ TEST(HandBoxFromPalm, FollowsTheHandDirection) {
     const float leftSide = palm.x - hand.x;
     EXPECT_GT(rightSide, leftSide);
     EXPECT_GT(hand.width, hand.height);
+}
+
+TEST(Detector, NamesTheDetectorsThatLoaded) {
+    Detector detector;
+    EXPECT_TRUE(detector.names().empty());
+    detector.add(std::make_unique<NamedDetector>("face"));
+    detector.add(std::make_unique<NamedDetector>("hand"));
+    EXPECT_EQ(detector.names(), (std::vector<std::string>{"face", "hand"}));
 }

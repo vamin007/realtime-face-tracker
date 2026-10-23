@@ -118,6 +118,14 @@ void buildDetectors(Detector& detector, const Options& opt, const ClassRegistry&
     if (detector.empty()) throw std::runtime_error("No detector could be loaded");
 }
 
+// "the yolo detector", "the yolo and face detectors".
+std::string detectorNames(const std::vector<std::string>& names) {
+    std::string text = "the ";
+    for (size_t i = 0; i < names.size(); ++i)
+        text += (i == 0 ? "" : i + 1 < names.size() ? ", " : " and ") + names[i];
+    return text + (names.size() == 1 ? " detector" : " detectors");
+}
+
 // Makes each saved label a class (so --classes and the overlay know its name).
 void registerLabels(const LabelLibrary& library, ClassRegistry& classes) {
     for (const CustomLabel& label : library.labels()) {
@@ -195,9 +203,18 @@ int main(int argc, char** argv) try {
         opt.yoloModel.path = fs::path(opt.yoloModel.path).parent_path() / "yolov8n.onnx";
 
     // Label photos are searched with every detector, whatever this run tracks.
-    if (!opt.enrollName.empty() || opt.syncLabels) opt.faces = opt.hands = true;
+    const bool labelCommand = !opt.enrollName.empty() || opt.syncLabels;
+    if (labelCommand) opt.faces = opt.hands = true;
     Detector detector;
     buildDetectors(detector, opt, classes);
+    // Without one, a sync would record photos as showing nothing, for good: the
+    // label commands stop here instead, before anything is copied or synced.
+    const std::vector<std::string> missing = missingForSync(detector.names());
+    if (labelCommand && !missing.empty())
+        throw std::runtime_error("Can't look at label photos: " + detectorNames(missing) +
+                                 " didn't load (see the warning above). A sync needs every "
+                                 "detector, or photos would be recorded as not showing the item; "
+                                 "nothing was changed.");
     Embedders embedders(opt.faceIdModel.path, opt.objectIdModel.path, opt.backend, opt.cacheDir);
     if (!opt.enrollName.empty()) {
         enroll(opt.enrollName, opt.enrollClass, opt.enrollPhotos, opt.wholePhoto, detector, classes,
@@ -209,11 +226,24 @@ int main(int argc, char** argv) try {
         return 0;
     }
     // Photos added to label folders since the last run are looked at now, with
-    // every detector (so not when some are turned off).
-    if (opt.labels && library.needsSync() && (!opt.faces || !opt.hands)) {
-        std::cout << "Label photos changed; run --sync-labels to look at them\n";
-    } else if (opt.labels && library.needsSync()) {
-        syncLabels(library, detector, classes, embedders, false);
+    // every detector (so not when one is turned off or didn't load: the labels
+    // then stay as the last sync left them).
+    if (opt.labels && library.needsSync()) {
+        std::vector<std::string> failed;  // missing, and not turned off
+        for (const std::string& name : missing)
+            if (!(name == "face" && !opt.faces) && !(name == "hand" && !opt.hands))
+                failed.push_back(name);
+        if (missing.empty()) {
+            syncLabels(library, detector, classes, embedders, false);
+        } else if (!failed.empty()) {
+            std::cout << "Label photos changed, but weren't looked at: " << detectorNames(failed)
+                      << " didn't load (see the warning above). Labels not updated.\n";
+        } else {
+            std::cout << "Label photos changed, but weren't looked at: that needs "
+                      << detectorNames(missing)
+                      << ", turned off for this run. Labels not updated; run --sync-labels to "
+                         "look at them.\n";
+        }
     }
     registerLabels(library, classes);
 

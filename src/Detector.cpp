@@ -66,3 +66,9 @@ std::vector<std::string> Detector::summary() const {
     }
     return lines;
 }
+
+std::vector<std::string> Detector::names() const {
+    std::vector<std::string> names;
+    for (const auto& detector : detectors_) names.push_back(detector->name());
+    return names;
+}

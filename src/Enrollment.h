@@ -19,6 +19,12 @@
 int syncLabels(LabelLibrary& library, Detector& detector, const ClassRegistry& classes,
                Embedders& embedders, bool all);
 
+// The detectors a sync needs that aren't among `loaded` (Detector::names()). A
+// sync looks for every class in the photos, so it needs yolo, face and hand:
+// without one, photos of its classes would be recorded as showing nothing (or
+// a label's class chosen wrongly), and not looked at again once it's back.
+std::vector<std::string> missingForSync(const std::vector<std::string>& loaded);
+
 // Teaches the tracker a specific item from photos: copies them into
 // <labels>/<name>/ and syncs. `classHint` (e.g. "cup") and `wholePhoto` (each
 // photo shows just the item) are saved in the label's label.yml. Enrolling an
