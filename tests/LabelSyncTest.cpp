@@ -14,6 +14,15 @@ namespace fs = std::filesystem;
 
 namespace {
 
+// While their `failing` is set, the stand-in models below throw for photos with
+// this background, as a real model can (out of memory, an ONNX Runtime error).
+const cv::Scalar kTroubleBackground(0, 160, 0);
+
+bool troublePhoto(const cv::Mat& frame) {
+    const cv::Vec3b p = frame.at<cv::Vec3b>(0, 0);
+    return cv::Scalar(p[0], p[1], p[2]) == kTroubleBackground;
+}
+
 // Finds the red rectangle in a test photo and calls it a cup.
 class RedCupDetector : public IDetector {
 public:
@@ -21,6 +30,7 @@ public:
     const char* name() const override { return "red"; }
     bool canDetect(ClassId id) const override { return id == cup_; }
     std::vector<Detection> detect(const cv::Mat& frame) override {
+        if (failing && troublePhoto(frame)) throw std::bad_alloc();
         cv::Mat mask;
         cv::inRange(frame, cv::Scalar(0, 0, 200), cv::Scalar(60, 60, 255), mask);
         int left = mask.cols, top = mask.rows, right = -1, bottom = -1;
@@ -37,6 +47,7 @@ public:
         d.conf = 0.9f;
         return {d};
     }
+    bool failing = false;
 
 private:
     ClassId cup_;
@@ -50,6 +61,7 @@ public:
     Embedding embed(const cv::Mat& frame, const cv::Rect2f& box,
                     const std::vector<cv::Point2f>&) override {
         ++calls;
+        if (failing && troublePhoto(frame)) throw std::runtime_error("the model failed");
         const cv::Rect roi = cv::Rect(box) & cv::Rect(0, 0, frame.cols, frame.rows);
         if (roi.area() <= 0) return {};
         const cv::Scalar m = cv::mean(frame(roi));
@@ -60,6 +72,7 @@ public:
         return e;
     }
     int calls = 0;
+    bool failing = false;
 };
 
 class TestEmbedders : public Embedders {
@@ -79,7 +92,9 @@ protected:
         dir = (root / "labels").string();
         fs::create_directories(dir);
         detector.setParallel(false);
-        detector.add(std::make_unique<RedCupDetector>(classes.find("cup")));
+        auto cups = std::make_unique<RedCupDetector>(classes.find("cup"));
+        cupDetector = cups.get();
+        detector.add(std::move(cups));
     }
     void TearDown() override { fs::remove_all(root); }
 
@@ -91,14 +106,41 @@ protected:
         cv::imwrite(path.string(), image);
     }
 
+    // A BMP whose header claims 100000 x 100000 pixels, more than OpenCV will
+    // read: cv::imread throws for it rather than returning an empty image.
+    static void hugeHeader(const fs::path& path) {
+        std::ofstream out(path, std::ios::binary);
+        auto put = [&](uint32_t v, int bytes) {
+            for (int i = 0; i < bytes; ++i) out.put(static_cast<char>(v >> (8 * i)));
+        };
+        out << "BM";
+        put(54, 4), put(0, 4), put(54, 4);           // file size, reserved, pixel data offset
+        put(40, 4), put(100000, 4), put(100000, 4);  // header size, width, height
+        put(1, 2), put(24, 2);                       // planes, bits per pixel
+        for (int i = 0; i < 6; ++i) put(0, 4);       // uncompressed; sizes, colors unset
+    }
+
     int sync(LabelLibrary& library) {
         return syncLabels(library, detector, classes, embedders, false);
+    }
+
+    // What a sync prints.
+    std::string syncReport(LabelLibrary& library) {
+        testing::internal::CaptureStdout();
+        try {
+            sync(library);
+        } catch (...) {
+            testing::internal::GetCapturedStdout();
+            throw;
+        }
+        return testing::internal::GetCapturedStdout();
     }
 
     fs::path root;
     std::string dir;
     ClassRegistry classes{{"person", "cup", "bottle"}};
     Detector detector;
+    RedCupDetector* cupDetector = nullptr;  // owned by detector
     TestEmbedders embedders;
 };
 
@@ -203,6 +245,94 @@ TEST_F(LabelSync, PhotosWithNothingFoundAreNotLookedAtOnEveryStart) {
     sync(library);
     ASSERT_EQ(library.labels().size(), 1u);
     EXPECT_EQ(library.labels()[0].baseClass, "cup");
+}
+
+TEST_F(LabelSync, PhotosThatCantBeReadAreRememberedAsUnusable) {
+    const fs::path mug = fs::path(dir) / "mug";
+    photo(mug / "a.png", 10);
+    std::ofstream(mug / "notes.jpg") << "not a photo\n";
+    hugeHeader(mug / "huge.bmp");
+    LabelLibrary library(dir);
+    library.load();
+    const std::string report = syncReport(library);
+    EXPECT_NE(report.find("huge.bmp: not used, can't read this file as an image"),
+              std::string::npos)
+        << report;
+    EXPECT_NE(report.find("notes.jpg: not used, can't read this file as an image"),
+              std::string::npos)
+        << report;
+    ASSERT_EQ(library.labels().size(), 1u);
+    const LabelFolder& f = library.folders()[0];
+    EXPECT_EQ(f.cache.photos.size(), 3u);
+    EXPECT_EQ(f.usedPhotos(), 1);
+    EXPECT_FALSE(library.needsSync()) << "the files won't read better next time";
+}
+
+TEST_F(LabelSync, APhotoTheModelFailsOnIsReportedAndTriedAgainAtTheNextSync) {
+    const fs::path mug = fs::path(dir) / "mug";
+    photo(mug / "a.png", 10);
+    photo(mug / "b.png", 60, kTroubleBackground);
+    photo(mug / "c.png", 100);
+    photo(fs::path(dir) / "thermos" / "a.png", 30);  // synced after mug
+    embedders.embedder.failing = true;
+    LabelLibrary library(dir);
+    library.load();
+    const std::string report = syncReport(library);
+    EXPECT_NE(report.find("b.png: not used, looking at it failed (the model failed)"),
+              std::string::npos)
+        << report;
+    EXPECT_NE(report.find("2 of 3 photo(s) usable"), std::string::npos) << report;
+    ASSERT_EQ(library.labels().size(), 2u);
+    const LabelFolder& f = library.folders()[library.findFolder("mug")];
+    EXPECT_EQ(f.usedPhotos(), 2);
+    // Not remembered as unusable: the model may well work next time.
+    EXPECT_EQ(f.cache.photos.size(), 2u);
+    ASSERT_EQ(f.plan.look.size(), 1u);
+    EXPECT_EQ(f.plan.look[0].name, "b.png");
+    EXPECT_TRUE(library.needsSync());
+
+    embedders.embedder.failing = false;
+    EXPECT_EQ(sync(library), 1);
+    EXPECT_EQ(library.folders()[library.findFolder("mug")].usedPhotos(), 3);
+    EXPECT_FALSE(library.needsSync());
+}
+
+TEST_F(LabelSync, PhotosTheDetectorFailsOnAreTriedAgainAtTheNextSync) {
+    // No class set: every photo is searched first, to choose it.
+    photo(fs::path(dir) / "mug" / "a.png", 10);
+    photo(fs::path(dir) / "mug" / "b.png", 60, kTroubleBackground);
+    // A class set: each photo is searched for it.
+    photo(fs::path(dir) / "thermos" / "a.png", 10);
+    photo(fs::path(dir) / "thermos" / "b.png", 60, kTroubleBackground);
+    std::ofstream(fs::path(dir) / "thermos" / "label.yml") << "class: cup\n";
+    // No other photo to choose the class from.
+    photo(fs::path(dir) / "jug" / "a.png", 10, kTroubleBackground);
+    cupDetector->failing = true;  // runs out of memory on those photos
+    LabelLibrary library(dir);
+    library.load();
+    const std::string report = syncReport(library);
+    size_t failed = 0;
+    for (size_t at = report.find(": not used, looking at it failed ("); at != std::string::npos;
+         at = report.find(": not used, looking at it failed (", at + 1))
+        ++failed;
+    EXPECT_EQ(failed, 3u) << report;
+    EXPECT_EQ(report.find("No photos yet"), std::string::npos) << report;
+    EXPECT_EQ(report.find("No object found"), std::string::npos) << report;
+    ASSERT_EQ(library.labels().size(), 2u);
+    for (const char* name : {"mug", "thermos"}) {
+        const LabelFolder& f = library.folders()[library.findFolder(name)];
+        EXPECT_EQ(f.usedPhotos(), 1) << name;
+        EXPECT_EQ(f.cache.photos.size(), 1u) << name;
+    }
+    EXPECT_TRUE(library.folders()[library.findFolder("jug")].cache.photos.empty());
+    EXPECT_TRUE(library.needsSync());
+
+    cupDetector->failing = false;
+    EXPECT_EQ(sync(library), 3);
+    EXPECT_EQ(library.labels().size(), 3u);
+    for (const char* name : {"mug", "thermos"})
+        EXPECT_EQ(library.folders()[library.findFolder(name)].usedPhotos(), 2) << name;
+    EXPECT_FALSE(library.needsSync());
 }
 
 TEST_F(LabelSync, BadFoldersAreReportedNotLoaded) {

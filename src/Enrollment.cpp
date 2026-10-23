@@ -91,6 +91,25 @@ std::string unreadableNote(const std::string& name) {
     return "can't read this file as an image";
 }
 
+// Reads a photo. Empty if OpenCV can't read the file (it isn't an image, or its
+// header claims an impossibly large one): that's down to the file, so the photo
+// is remembered as unusable. Running out of memory may not happen next time, so
+// that still throws.
+cv::Mat readPhoto(const std::string& path) {
+    try {
+        return cv::imread(path);
+    } catch (const cv::Exception& e) {
+        if (e.code == cv::Error::StsNoMem) throw;
+        return {};
+    }
+}
+
+// Why a photo couldn't be looked at this time (a model failed, memory ran out).
+// Such a photo isn't remembered, so the next sync looks at it again.
+std::string retryNote(const std::string& error) {
+    return "looking at it failed (" + error + "); the next sync tries it again";
+}
+
 bool itemMissing(const PhotoRecord& r) { return !r.used && r.note.rfind("no ", 0) == 0; }
 
 // Looks at one photo: finds the item (or takes the whole photo) and embeds it,
@@ -152,15 +171,21 @@ Change syncFolder(const LabelFolder& f, ClassId base, const SyncPlan& plan, Dete
 
     std::vector<std::vector<Detection>> detections(plan.look.size());
     std::vector<bool> detected(plan.look.size(), false);
+    // Why looking at a photo failed, when it may not fail next time (see retryNote).
+    std::vector<std::string> failed(plan.look.size());
     if (base < 0) {
         // The class is chosen from the photos, so all of them are looked at first.
         std::vector<cv::Size> sizes(plan.look.size());
         for (size_t i = 0; i < plan.look.size(); ++i) {
-            const cv::Mat image = cv::imread(pathOf(plan.look[i]));
-            if (image.empty()) continue;
-            sizes[i] = image.size();
-            detections[i] = detector.detect(image, {});
-            detected[i] = true;
+            try {
+                const cv::Mat image = readPhoto(pathOf(plan.look[i]));
+                if (image.empty()) continue;
+                detections[i] = detector.detect(image, {});
+                sizes[i] = image.size();
+                detected[i] = true;
+            } catch (const std::exception& e) {
+                failed[i] = e.what();
+            }
         }
         base = chooseClass(detections, sizes, classes);
         change.choseClass = base >= 0;
@@ -172,9 +197,11 @@ Change syncFolder(const LabelFolder& f, ClassId base, const SyncPlan& plan, Dete
             for (size_t i = 0; i < plan.look.size(); ++i) {
                 PhotoRecord r;
                 r.file = plan.look[i];
-                r.note = sizes[i].area() > 0 ? "nothing found" : unreadableNote(r.file.name);
+                r.note = !failed[i].empty()    ? retryNote(failed[i])
+                         : sizes[i].area() > 0 ? "nothing found"
+                                               : unreadableNote(r.file.name);
                 change.lines.push_back(r.file.name + ": not used, " + r.note);
-                cache.photos.push_back(std::move(r));
+                if (failed[i].empty()) cache.photos.push_back(std::move(r));
             }
             writeCache(cacheFile, cache);
             return change;
@@ -186,14 +213,22 @@ Change syncFolder(const LabelFolder& f, ClassId base, const SyncPlan& plan, Dete
                      wholePhoto, plan.keep};
     for (size_t i = 0; i < plan.look.size(); ++i) {
         const PhotoFile& photo = plan.look[i];
-        const cv::Mat image = cv::imread(pathOf(photo));
-        if (!image.empty() && !wholePhoto && !detected[i])
-            detections[i] = detector.detect(image, {});
-        PhotoRecord r = examine(photo, image, detections[i], base, wholePhoto, classes, embedder);
+        PhotoRecord r;
+        if (failed[i].empty()) {
+            try {
+                const cv::Mat image = readPhoto(pathOf(photo));
+                if (!image.empty() && !wholePhoto && !detected[i])
+                    detections[i] = detector.detect(image, {});
+                r = examine(photo, image, detections[i], base, wholePhoto, classes, embedder);
+            } catch (const std::exception& e) {
+                failed[i] = e.what();
+            }
+        }
+        if (!failed[i].empty()) r.note = retryNote(failed[i]);
         const bool changed = std::count(plan.changed.begin(), plan.changed.end(), photo.name) > 0;
         change.lines.push_back(photo.name + (changed ? " (changed)" : "") + ": " +
                                (r.used ? "" : "not used, ") + r.note);
-        cache.photos.push_back(std::move(r));
+        if (failed[i].empty()) cache.photos.push_back(std::move(r));
     }
     std::sort(cache.photos.begin(), cache.photos.end(),
               [](const PhotoRecord& a, const PhotoRecord& b) { return a.file.name < b.file.name; });
@@ -217,7 +252,8 @@ void printReport(const LabelFolder& f, const Change* change, const LabelLibrary&
                     f.cache.baseClass.c_str(), settingsFile.c_str(),
                     f.cache.baseClass == "cup" ? "bottle" : "cup");
 
-    const int total = static_cast<int>(f.cache.photos.size());
+    // The photos in the folder: one that couldn't be looked at this time isn't in the cache.
+    const int total = static_cast<int>(f.photos.size());
     const int used = f.usedPhotos();
     const bool missing = std::any_of(f.cache.photos.begin(), f.cache.photos.end(), itemMissing);
     const int index = library.find(f.name);
@@ -225,7 +261,7 @@ void printReport(const LabelFolder& f, const Change* change, const LabelLibrary&
         std::printf("  No photos yet: put 5-10 photos of the item in %s\n", f.path.c_str());
         return;
     }
-    if (f.cache.baseClass.empty())
+    if (f.cache.baseClass.empty() && !f.cache.photos.empty())
         std::printf("  No object found in the photos. Say what it is in %s, e.g.  class: cup\n",
                     settingsFile.c_str());
     if (index < 0) {
