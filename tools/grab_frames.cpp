@@ -7,8 +7,9 @@
 //   --start S     from S seconds into the video (default 0)
 //   --end S       until S seconds (default: the end)
 //   --count N     at most N photos
-//   --crop CLASS  save just the most prominent CLASS (e.g. "cell phone", face)
-//                 with a margin around it, skipping frames without one
+//   --crop CLASS  save just the most prominent CLASS (a COCO class such as
+//                 "cell phone", face or hand) with a margin around it,
+//                 skipping frames without one
 //   --prefix NAME file names: NAME_000.jpg, NAME_001.jpg, ... (default: frame)
 
 #include <cstdio>
@@ -23,6 +24,7 @@
 #include "ClassRegistry.h"
 #include "Detector.h"
 #include "FaceDetector.h"
+#include "HandDetector.h"
 #include "YoloDetector.h"
 
 namespace fs = std::filesystem;
@@ -69,11 +71,17 @@ int main(int argc, char** argv) try {
     if (!cropClass.empty()) {
         crop = classes.find(cropClass);
         if (crop < 0 || classes.kind(crop) == ClassKind::Custom)
-            throw std::runtime_error("Unknown class '" + cropClass + "'");
+            throw std::runtime_error("Unknown class '" + cropClass +
+                                     "' (crop a class from models/coco.names, face or hand)");
         if (crop == classes.face())
             detector.add(std::make_unique<FaceDetector>(
                 models + "face_detection_yunet_2023mar.onnx", classes.face(),
                 DetectorThresholds{0.6f, 0.1f, 0.3f}, 640));
+        else if (crop == classes.hand())
+            detector.add(std::make_unique<HandDetector>(
+                models + "palm_detection_mediapipe_2023feb.onnx", classes.hand(),
+                DetectorThresholds{0.6f, 0.1f, 0.3f}, Backend::CoreML,
+                PROJECT_DIR "/.cache/coreml"));
         else
             detector.add(std::make_unique<YoloDetector>(
                 models + "yolov8n_384x640.onnx", classes.cocoCount(), DetectorThresholds{0.4f},
@@ -85,7 +93,7 @@ int main(int argc, char** argv) try {
     fs::create_directories(outDir);
     const double fps = cap.get(cv::CAP_PROP_FPS) > 0 ? cap.get(cv::CAP_PROP_FPS) : 30;
     double next = start;
-    long saved = 0;
+    long saved = 0, searched = 0;  // searched: frames the crop class was looked for in
     cv::Mat frame;
     for (long index = 0; saved < count && cap.read(frame); ++index) {
         const double t = index / fps;
@@ -93,6 +101,7 @@ int main(int argc, char** argv) try {
         if (t + 1e-9 < next) continue;
         cv::Mat photo = frame;
         if (crop >= 0) {
+            ++searched;
             const Detection* best = nullptr;
             const auto detections = detector.detect(frame, {crop});
             for (const Detection& d : detections)
@@ -117,6 +126,9 @@ int main(int argc, char** argv) try {
         next = t + every;
     }
     std::printf("Saved %ld photo(s) to %s\n", saved, outDir.c_str());
+    if (crop >= 0 && saved == 0)
+        std::cerr << "Warning: no confident " << cropClass << " in the " << searched
+                  << " frame(s) searched\n";
     return 0;
 } catch (const std::exception& e) {
     std::cerr << "Error: " << e.what() << '\n';
