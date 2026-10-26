@@ -48,27 +48,31 @@ TEST(Options, ErrorMessagesSayWhatWasExpected) {
 }
 
 TEST(Options, EnrollTakesANameAndPhotos) {
-    const Options opt = parse({"--enroll", "my_mug", "a.jpg", "b.jpg", "--class", "cup"});
-    EXPECT_EQ(opt.enrollName, "my_mug");
-    EXPECT_EQ(opt.enrollClass, "cup");
+    const Options opt = parse({"--enroll", "alex", "a.jpg", "b.jpg"});
+    EXPECT_EQ(opt.enrollName, "alex");
     EXPECT_EQ(opt.enrollPhotos, (std::vector<std::string>{"a.jpg", "b.jpg"}));
-    EXPECT_THROW(parse({"--enroll", "my_mug"}), std::runtime_error);  // no photos
-    EXPECT_THROW(parse({"a.jpg"}), std::runtime_error);               // photos without --enroll
-    EXPECT_THROW(parse({"--class", "cup"}), std::runtime_error);      // --class without --enroll
+    EXPECT_THROW(parse({"--enroll", "alex"}), std::runtime_error);  // no photos
+    EXPECT_THROW(parse({"a.jpg"}), std::runtime_error);             // photos without --enroll
+}
+
+// Every label is a face, found in each photo: an earlier version's options for
+// object labels (what the item is, close-ups of it) are gone.
+TEST(Options, ObjectLabelOptionsAreGone) {
+    EXPECT_THROW(parse({"--enroll", "alex", "a.jpg", "--class", "face"}), std::runtime_error);
+    EXPECT_THROW(parse({"--enroll", "alex", "a.jpg", "--whole-photo"}), std::runtime_error);
 }
 
 TEST(Options, LabelCommands) {
-    Options opt = parse({"--add-photos", "my_mug", "c.jpg"});
-    EXPECT_EQ(opt.enrollName, "my_mug");
+    Options opt = parse({"--add-photos", "alex", "c.jpg"});
+    EXPECT_EQ(opt.enrollName, "alex");
     EXPECT_TRUE(opt.addPhotos);
     EXPECT_EQ(opt.enrollPhotos, std::vector<std::string>{"c.jpg"});
-    EXPECT_THROW(parse({"--add-photos", "my_mug"}), std::runtime_error);  // no photos
-    EXPECT_THROW(parse({"--add-photos", "my_mug", "c.jpg", "--class", "cup"}), std::runtime_error);
+    EXPECT_THROW(parse({"--add-photos", "alex"}), std::runtime_error);  // no photos
     EXPECT_TRUE(parse({"--sync-labels"}).syncLabels);
-    opt = parse({"--rename-label", "mug", "my_mug"});
-    EXPECT_EQ(opt.renameLabel, "mug");
-    EXPECT_EQ(opt.renameTo, "my_mug");
-    EXPECT_THROW(parse({"--rename-label", "mug"}), std::runtime_error);  // no new name
+    opt = parse({"--rename-label", "alex", "alex_b"});
+    EXPECT_EQ(opt.renameLabel, "alex");
+    EXPECT_EQ(opt.renameTo, "alex_b");
+    EXPECT_THROW(parse({"--rename-label", "alex"}), std::runtime_error);  // no new name
 }
 
 TEST(Options, ModelFlagsMarkTheModelAsRequired) {

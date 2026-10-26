@@ -16,18 +16,17 @@ Embedding unit(std::vector<float> v) {
 
 LabelSample sample(std::vector<float> v) { return {"photo.jpg", {1, 2, 3, 4}, false, unit(v)}; }
 
-CustomLabel makeLabel(const std::string& name, const std::string& base,
-                      std::vector<LabelSample> samples) {
-    return {name, base, "test-model", 0, std::move(samples)};
+CustomLabel makeLabel(const std::string& name, std::vector<LabelSample> samples) {
+    return {name, "test-model", 0, std::move(samples)};
 }
 
 }  // namespace
 
 TEST(Labels, NamesAreSafeForFoldersAndClasses) {
-    EXPECT_TRUE(validLabelName("my_mug"));
+    EXPECT_TRUE(validLabelName("alex_b"));
     EXPECT_TRUE(validLabelName("Vivek-2"));
     EXPECT_FALSE(validLabelName(""));
-    EXPECT_FALSE(validLabelName("my mug"));
+    EXPECT_FALSE(validLabelName("alex b"));
     EXPECT_FALSE(validLabelName("../etc"));
     EXPECT_FALSE(validLabelName("a,b"));
 }
@@ -42,38 +41,36 @@ TEST(Labels, TargetIsNotALabelNameInAnyCase) {
 
 TEST(Labels, ScoreIsTheMeanOfTheThreeBestSamples) {
     const CustomLabel label = makeLabel(
-        "x", "cup",
-        {sample({1, 0}), sample({1, 0}), sample({0, 1}), sample({1, 1}), sample({-1, 0})});
+        "x", {sample({1, 0}), sample({1, 0}), sample({0, 1}), sample({1, 1}), sample({-1, 0})});
     // Similarities to (1, 0): 1, 1, 0, 0.707, -1 -> best three: 1, 1, 0.707.
     EXPECT_NEAR(labelScore(label, unit({1, 0})), (2 + std::sqrt(0.5f)) / 3, 1e-5);
 }
 
 TEST(Labels, MatchNeedsTheThresholdAndAClearWinner) {
     LabelLibrary library("unused");
-    library.labels() = {makeLabel("mug_a", "cup", {sample({1, 0, 0})}),
-                        makeLabel("mug_b", "cup", {sample({0.9f, 0.1f, 0})}),
-                        makeLabel("bottle", "bottle", {sample({1, 0, 0})})};
-    // Close to both mugs: no clear winner.
-    LabelMatch m = library.match("cup", unit({1, 0.05f, 0}), 0.5f, 0.05f);
+    library.labels() = {makeLabel("alex", {sample({1, 0, 0})}),
+                        makeLabel("sam", {sample({0.9f, 0.1f, 0})})};
+    // Close to both: no clear winner.
+    LabelMatch m = library.match(unit({1, 0.05f, 0}), 0.5f, 0.05f);
     EXPECT_EQ(m.label, -1);
-    // Clearly mug_a.
-    library.labels()[1] = makeLabel("mug_b", "cup", {sample({0, 1, 0})});
-    m = library.match("cup", unit({1, 0.05f, 0}), 0.5f, 0.05f);
+    // Clearly alex.
+    library.labels()[1] = makeLabel("sam", {sample({0, 1, 0})});
+    m = library.match(unit({1, 0.05f, 0}), 0.5f, 0.05f);
     EXPECT_EQ(m.label, 0);
     // Below the threshold.
-    m = library.match("cup", unit({0.3f, 0.3f, 1}), 0.5f, 0.05f);
+    m = library.match(unit({0.3f, 0.3f, 1}), 0.5f, 0.05f);
     EXPECT_EQ(m.label, -1);
-    // Only labels of the asked class compete.
-    m = library.match("bottle", unit({1, 0, 0}), 0.5f, 0.05f);
-    EXPECT_EQ(library.labels()[m.label].name, "bottle");
-    EXPECT_EQ(library.match("chair", unit({1, 0, 0}), 0.5f, 0.05f).label, -1);
+    // A label's own threshold.
+    library.labels()[0].threshold = 0.999f;
+    EXPECT_EQ(library.match(unit({1, 0.05f, 0}), 0.5f, 0.05f).label, -1);
+    EXPECT_EQ(LabelLibrary("unused").match(unit({1, 0, 0}), 0.5f, 0.05f).label, -1) << "no labels";
 }
 
 TEST(Labels, SaveAndLoadRoundTrip) {
     const std::string dir = testing::TempDir() + "/labels_roundtrip";
     std::filesystem::remove_all(dir);
     LabelLibrary library(dir);
-    CustomLabel label = makeLabel("my_mug", "cup", {sample({1, 2, 3}), sample({3, 2, 1})});
+    CustomLabel label = makeLabel("alex", {sample({1, 2, 3}), sample({3, 2, 1})});
     label.samples[1].flipped = true;
     label.threshold = 0.7f;
     library.save(label);
@@ -82,8 +79,7 @@ TEST(Labels, SaveAndLoadRoundTrip) {
     loaded.load();
     ASSERT_EQ(loaded.labels().size(), 1u);
     const CustomLabel& back = loaded.labels()[0];
-    EXPECT_EQ(back.name, "my_mug");
-    EXPECT_EQ(back.baseClass, "cup");
+    EXPECT_EQ(back.name, "alex");
     EXPECT_EQ(back.model, "test-model");
     EXPECT_FLOAT_EQ(back.threshold, 0.7f);
     ASSERT_EQ(back.samples.size(), 2u);
@@ -92,6 +88,9 @@ TEST(Labels, SaveAndLoadRoundTrip) {
     EXPECT_TRUE(back.samples[1].flipped);
     ASSERT_EQ(back.samples[0].embedding.size(), 3u);
     EXPECT_NEAR(similarity(back.samples[0].embedding, label.samples[0].embedding), 1, 1e-5);
+    // As the earlier version, which also had object labels, reads it.
+    EXPECT_EQ(loaded.folders()[0].cache.baseClass, "face");
+    EXPECT_TRUE(loaded.folders()[0].cache.autoClass) << "label.yml sets no class";
     std::filesystem::remove_all(dir);
 }
 
@@ -109,17 +108,16 @@ PhotoRecord record(const std::string& name, long long size = 100, long long mtim
     return r;
 }
 
-LabelCache cupCache(std::vector<PhotoRecord> photos) {
-    return {"test-model", "cup", true, false, std::move(photos)};
+LabelCache faceCache(std::vector<PhotoRecord> photos) {
+    return {"test-model", "face", true, false, std::move(photos)};
 }
 
 }  // namespace
 
 TEST(Labels, PlanSyncFindsNewChangedAndRemovedPhotos) {
-    const LabelCache cache = cupCache({record("a.jpg"), record("b.jpg"), record("gone.jpg")});
-    const SyncPlan plan = planSync({}, cache,
-                                   {file("a.jpg"), file("b.jpg", 100, 6), file("new.jpg")},
-                                   "test-model");
+    const LabelCache cache = faceCache({record("a.jpg"), record("b.jpg"), record("gone.jpg")});
+    const SyncPlan plan =
+        planSync(cache, {file("a.jpg"), file("b.jpg", 100, 6), file("new.jpg")}, "test-model");
     EXPECT_FALSE(plan.redoAll);
     ASSERT_EQ(plan.keep.size(), 1u);
     EXPECT_EQ(plan.keep[0].file.name, "a.jpg");
@@ -129,35 +127,39 @@ TEST(Labels, PlanSyncFindsNewChangedAndRemovedPhotos) {
     EXPECT_EQ(plan.changed, std::vector<std::string>{"b.jpg"});
     EXPECT_EQ(plan.removed, std::vector<std::string>{"gone.jpg"});
 
-    const SyncPlan same = planSync({}, cache, {file("a.jpg"), file("b.jpg"), file("gone.jpg")},
-                                   "test-model");
+    const SyncPlan same =
+        planSync(cache, {file("a.jpg"), file("b.jpg"), file("gone.jpg")}, "test-model");
     EXPECT_TRUE(same.empty());
     EXPECT_EQ(same.keep.size(), 3u);
 }
 
 TEST(Labels, PlanSyncRedoesEveryPhotoWhenWhatTheyWereMadeWithChanges) {
-    const LabelCache cache = cupCache({record("a.jpg"), record("b.jpg")});
+    const LabelCache cache = faceCache({record("a.jpg"), record("b.jpg")});
     const std::vector<PhotoFile> photos = {file("a.jpg"), file("b.jpg")};
-    auto redo = [&](const LabelSettings& s, const LabelCache& c, const std::string& model) {
-        const SyncPlan plan = planSync(s, c, photos, model);
-        return plan.redoAll && plan.keep.empty() && plan.look.size() == 2;
+    auto redo = [&](const LabelCache& c, const std::string& model) {
+        const SyncPlan plan = planSync(c, photos, model);
+        return plan.redoAll && plan.keep.empty() && plan.look.size() == 2 ? plan.reason : "-";
     };
-    EXPECT_FALSE(redo({"cup"}, cache, "test-model")) << "the class chosen before, now set";
-    EXPECT_TRUE(redo({"bottle"}, cache, "test-model"));
-    EXPECT_TRUE(redo({"", true}, cache, "test-model")) << "whole_photo turned on";
-    EXPECT_TRUE(redo({}, cache, "other-model"));
-    EXPECT_FALSE(redo({}, cache, "")) << "model not checked";
+    EXPECT_EQ(redo(cache, "test-model"), "-");
+    EXPECT_EQ(redo(cache, "other-model"), "the embedding model changed");
+    EXPECT_EQ(redo(cache, ""), "-") << "model not checked";
 
-    LabelCache given = cache;
-    given.autoClass = false;
-    EXPECT_FALSE(redo({"cup"}, given, "test-model"));
-    EXPECT_TRUE(redo({}, given, "test-model")) << "label.yml no longer sets the class";
+    // An earlier version also had object labels and whole photos.
+    LabelCache object = cache;  // label.yml says class: face now
+    object.baseClass = "cell phone";
+    EXPECT_EQ(redo(object, "test-model"), "its class changed from cell phone to face");
+    LabelCache whole = cache;
+    whole.wholePhoto = true;
+    EXPECT_EQ(redo(whole, "test-model"),
+              "whole photos aren't used any more (the face is found in each photo)");
 
-    LabelCache none = cache;  // no class could be chosen last time
+    LabelCache none = cache;  // that version found nothing to choose a class from
     none.baseClass.clear();
-    EXPECT_FALSE(planSync({}, none, photos, "").redoAll) << "same photos: still nothing to find";
-    EXPECT_TRUE(planSync({}, none, {file("a.jpg")}, "").redoAll);
-    EXPECT_TRUE(planSync({}, {}, photos, "").redoAll) << "a new label";
+    EXPECT_EQ(redo(none, "test-model"), "-") << "same photos: still nothing to find";
+    EXPECT_FALSE(planSync(none, {file("a.jpg"), file("c.jpg")}, "").redoAll) << "just the new one";
+    const SyncPlan fresh = planSync({}, photos, "test-model");  // a new label
+    EXPECT_EQ(fresh.look.size(), 2u);
+    EXPECT_TRUE(fresh.reason.empty());
 }
 
 TEST(Labels, SettingsAreReadFromAHandWrittenFile) {
@@ -166,46 +168,59 @@ TEST(Labels, SettingsAreReadFromAHandWrittenFile) {
         std::ofstream(path) << text;
         return readSettings(path);
     };
-    LabelSettings s = read("# my mug\nclass: cup\nwhole_photo: yes\nthreshold: 0.7\n");
-    EXPECT_EQ(s.baseClass, "cup");
-    EXPECT_TRUE(s.wholePhoto);
+    LabelSettings s = read("# alex\nthreshold: 0.7\n");
     EXPECT_FLOAT_EQ(s.threshold, 0.7f);
-    s = read("class: cell phone\nwhole_photo: false\n");
-    EXPECT_EQ(s.baseClass, "cell phone");
-    EXPECT_FALSE(s.wholePhoto);
-    EXPECT_TRUE(read("whole_photo: true\n").wholePhoto);
-    EXPECT_TRUE(read("# nothing set yet\n\n").baseClass.empty());
-    EXPECT_TRUE(read("").baseClass.empty());
-    EXPECT_THROW(read("clas: cup\n"), std::runtime_error);
-    EXPECT_THROW(read("whole_photo: maybe\n"), std::runtime_error);
+    EXPECT_TRUE(s.oldKeys.empty());
+    EXPECT_FLOAT_EQ(read("# nothing set yet\n\n").threshold, 0);
+    EXPECT_FLOAT_EQ(read("").threshold, 0);
+    EXPECT_THROW(read("treshold: 0.5\n"), std::runtime_error);
     EXPECT_THROW(read("threshold: 3\n"), std::runtime_error);
     std::filesystem::remove(path);
-    EXPECT_TRUE(readSettings(path).baseClass.empty()) << "no file: the defaults";
+    EXPECT_FLOAT_EQ(readSettings(path).threshold, 0) << "no file: the defaults";
 
-    writeSettings(path, {"wine glass", true, 0.65f});
+    writeSettings(path, {0.65f});
     s = readSettings(path);
-    EXPECT_EQ(s.baseClass, "wine glass");
-    EXPECT_TRUE(s.wholePhoto);
     EXPECT_FLOAT_EQ(s.threshold, 0.65f);
+    EXPECT_TRUE(s.oldKeys.empty()) << "nothing but the threshold is written";
+    std::filesystem::remove(path);
+}
+
+// An earlier version also had object labels, set with class and whole_photo.
+// They're read but not used; a class other than face makes the folder unusable.
+TEST(Labels, AnEarlierVersionsSettingsAreReadButNotUsed) {
+    const std::string path = testing::TempDir() + "/label_settings_old.yml";
+    auto read = [&](const std::string& text) {
+        std::ofstream(path) << text;
+        return readSettings(path);
+    };
+    LabelSettings s = read("class: face\nwhole_photo: false\nthreshold: 0.5\n");
+    EXPECT_EQ(s.oldClass, "face");
+    EXPECT_EQ(s.oldKeys, (std::vector<std::string>{"class", "whole_photo"}));
+    EXPECT_FLOAT_EQ(s.threshold, 0.5f);
+    EXPECT_EQ(read("class: cell phone\n").oldClass, "cell phone");
+    s = read("whole_photo: maybe\n");  // not used, so not checked
+    EXPECT_TRUE(s.oldClass.empty());
+    EXPECT_EQ(s.oldKeys, std::vector<std::string>{"whole_photo"});
+    EXPECT_THROW(read("class: [face]\n"), std::runtime_error);
     std::filesystem::remove(path);
 }
 
 TEST(Labels, CacheRoundTrip) {
     const std::string path = testing::TempDir() + "/label_cache.yml";
-    LabelCache cache = cupCache({record("a.jpg", 123456789012LL, 1792070584123456789LL)});
+    LabelCache cache = faceCache({record("a.jpg", 123456789012LL, 1792070584123456789LL)});
     cache.photos[0].roi = {1, 2, 3, 4};
     cache.photos[0].conf = 0.8f;
     cache.photos[0].mirrored = unit({0, 1});
     PhotoRecord unused;
     unused.file = file("blurry.jpg");
-    unused.note = "no cup found";
+    unused.note = "no face found";
     cache.photos.push_back(unused);
     writeCache(path, cache);
 
     LabelCache back;
     ASSERT_TRUE(readCache(path, back));
     EXPECT_EQ(back.model, "test-model");
-    EXPECT_EQ(back.baseClass, "cup");
+    EXPECT_EQ(back.baseClass, "face");
     EXPECT_TRUE(back.autoClass);
     ASSERT_EQ(back.photos.size(), 2u);
     EXPECT_EQ(back.photos[0].file.size, 123456789012LL);
@@ -215,7 +230,7 @@ TEST(Labels, CacheRoundTrip) {
     EXPECT_EQ(back.photos[0].embedding, cache.photos[0].embedding);
     EXPECT_EQ(back.photos[0].mirrored, cache.photos[0].mirrored);
     EXPECT_FALSE(back.photos[1].used);
-    EXPECT_EQ(back.photos[1].note, "no cup found");
+    EXPECT_EQ(back.photos[1].note, "no face found");
     std::filesystem::remove(path);
     EXPECT_FALSE(readCache(path, back));
 }
@@ -235,8 +250,7 @@ TEST(Labels, AgreementComparesEachPhotoWithTheOtherPhotos) {
     a.image = aMirror.image = "a.jpg";
     aMirror.flipped = true;
     b.image = "b.jpg";
-    const std::vector<PhotoAgreement> agreement =
-        photoAgreement(makeLabel("x", "cup", {a, aMirror, b}));
+    const std::vector<PhotoAgreement> agreement = photoAgreement(makeLabel("x", {a, aMirror, b}));
     ASSERT_EQ(agreement.size(), 2u);
     EXPECT_EQ(agreement[0].image, "a.jpg");
     EXPECT_NEAR(agreement[0].agreement, 1, 1e-5) << "only b, not its own mirrored copy";
@@ -252,16 +266,16 @@ TEST(Labels, ConfusionFlagsLabelsThatLookAlike) {
         }
         return samples;
     };
-    const CustomLabel mugA = makeLabel("mug_a", "cup", photos({{1, 0, 0}, {0.95f, 0.1f, 0}}));
-    const CustomLabel twin = makeLabel("twin", "cup", photos({{0.98f, 0.05f, 0}, {1, 0.08f, 0}}));
-    const CustomLabel mugB = makeLabel("mug_b", "cup", photos({{0, 1, 0}, {0, 0.95f, 0.1f}}));
+    const CustomLabel alex = makeLabel("alex", photos({{1, 0, 0}, {0.95f, 0.1f, 0}}));
+    const CustomLabel twin = makeLabel("twin", photos({{0.98f, 0.05f, 0}, {1, 0.08f, 0}}));
+    const CustomLabel sam = makeLabel("sam", photos({{0, 1, 0}, {0, 0.95f, 0.1f}}));
 
-    const LabelConfusion alike = labelConfusion(mugA, twin, 0.5f, 0.05f);
+    const LabelConfusion alike = labelConfusion(alex, twin, 0.5f, 0.05f);
     EXPECT_EQ(alike.photos, 2);
     EXPECT_EQ(alike.ambiguous, 2);
     EXPECT_GT(alike.otherScore, 0.9f);
 
-    const LabelConfusion apart = labelConfusion(mugA, mugB, 0.5f, 0.05f);
+    const LabelConfusion apart = labelConfusion(alex, sam, 0.5f, 0.05f);
     EXPECT_EQ(apart.ambiguous, 0);
     EXPECT_GT(apart.ownScore, 0.9f);
     EXPECT_LT(apart.otherScore, 0.2f);

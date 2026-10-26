@@ -50,7 +50,6 @@ Options defaultOptions(const std::string& projectDir) {
     opt.faceModel = {models + "face_detection_yunet_2023mar.onnx"};
     opt.handModel = {models + "palm_detection_mediapipe_2023feb.onnx"};
     opt.faceIdModel = {models + "face_recognition_sface_2021dec.onnx"};
-    opt.objectIdModel = {models + "dinov2_small.onnx"};
     opt.names = models + "coco.names";
     opt.logDir = projectDir + "/logs";
     opt.cacheDir = projectDir + "/.cache/coreml";
@@ -84,13 +83,11 @@ void printUsage() {
            "  --no-targeting        turn it off\n"
            "  --target-ratio N      a lit face is N times as bright as the room (default 1.0)\n"
            "  --target-rise N       ... and N times brighter than it normally is (default 1.35)\n"
-           "\nCustom labels (a specific item, taught from photos):\n"
+           "\nCustom labels (a specific person, recognized by their face, taught from photos):\n"
            "  Each label is a folder of photos, labels/NAME/; new and changed photos are\n"
            "  looked at when the tracker starts.\n"
-           "  --enroll NAME PHOTO...  teach an item (e.g. --enroll my_mug a.jpg b.jpg c.jpg)\n"
-           "  --class CLASS         with --enroll: what it is (e.g. cup); default: what stands "
-           "out\n"
-           "  --whole-photo         with --enroll: each photo shows just the item (close-ups)\n"
+           "  --enroll NAME PHOTO...  teach a person's face (e.g. --enroll alex a.jpg b.jpg "
+           "c.jpg)\n"
            "  --add-photos NAME PHOTO...  add photos to a label\n"
            "  --sync-labels         look at new and changed photos now, check the labels, exit\n"
            "  --list-labels         list the labels and exit\n"
@@ -150,8 +147,6 @@ bool parseArgs(const std::vector<std::string>& args, Options& opt) {
         else if (arg == "--target-ratio") opt.target.minRatio = parseFloat(arg, next(), 0.5f, 100);
         else if (arg == "--target-rise") opt.target.minRise = parseFloat(arg, next(), 1, 100);
         else if (arg == "--enroll") opt.enrollName = next();
-        else if (arg == "--class") opt.enrollClass = next();
-        else if (arg == "--whole-photo") opt.wholePhoto = true;
         else if (arg == "--add-photos") {
             opt.enrollName = next();
             opt.addPhotos = true;
@@ -191,8 +186,6 @@ bool parseArgs(const std::vector<std::string>& args, Options& opt) {
     if (!opt.enrollName.empty() && opt.enrollPhotos.empty())
         throw std::runtime_error((opt.addPhotos ? "--add-photos " : "--enroll ") + opt.enrollName +
                                  " needs at least one photo");
-    if (!opt.enrollClass.empty() && (opt.enrollName.empty() || opt.addPhotos))
-        throw std::runtime_error("--class goes with --enroll");
     if (!opt.window && opt.video.empty() && opt.maxFrames == 0)
         throw std::runtime_error(
             "--no-window needs --video or --max-frames (nothing could stop it)");

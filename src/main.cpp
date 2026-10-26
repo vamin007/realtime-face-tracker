@@ -129,14 +129,8 @@ std::string detectorNames(const std::vector<std::string>& names) {
 // Makes each saved label a class (so --classes and the overlay know its name).
 void registerLabels(const LabelLibrary& library, ClassRegistry& classes) {
     for (const CustomLabel& label : library.labels()) {
-        const ClassId base = classes.find(label.baseClass);
-        if (base < 0 || classes.kind(base) == ClassKind::Custom) {
-            std::cerr << "Warning: label " << label.name << " refines unknown class "
-                      << label.baseClass << "; ignored\n";
-            continue;
-        }
         try {
-            classes.addCustom(label.name, base);
+            classes.addCustom(label.name, classes.face());
         } catch (const std::exception& e) {
             std::cerr << "Warning: label " << label.name << ": " << e.what() << '\n';
         }
@@ -202,43 +196,40 @@ int main(int argc, char** argv) try {
     if (!opt.yoloModel.explicitlySet && !fs::exists(opt.yoloModel.path))
         opt.yoloModel.path = fs::path(opt.yoloModel.path).parent_path() / "yolov8n.onnx";
 
-    // Label photos are searched with every detector, whatever this run tracks.
+    // Label photos are searched for faces, whatever this run tracks.
     const bool labelCommand = !opt.enrollName.empty() || opt.syncLabels;
-    if (labelCommand) opt.faces = opt.hands = true;
+    if (labelCommand) opt.faces = true;
     Detector detector;
     buildDetectors(detector, opt, classes);
-    // Without one, a sync would record photos as showing nothing, for good: the
-    // label commands stop here instead, before anything is copied or synced.
+    // Without the face detector, a sync would record photos as showing no face,
+    // for good: the label commands stop here instead, before anything is copied
+    // or synced. (The other detectors aren't needed.)
     const std::vector<std::string> missing = missingForSync(detector.names());
     if (labelCommand && !missing.empty())
         throw std::runtime_error("Can't look at label photos: " + detectorNames(missing) +
-                                 " didn't load (see the warning above). A sync needs every "
-                                 "detector, or photos would be recorded as not showing the item; "
-                                 "nothing was changed.");
-    Embedders embedders(opt.faceIdModel.path, opt.objectIdModel.path, opt.backend, opt.cacheDir);
+                                 " didn't load (see the warning above). A sync needs it, or "
+                                 "photos would be recorded as showing no face; nothing was "
+                                 "changed.");
+    FaceEmbedder faceEmbedder(opt.faceIdModel.path);  // loaded on first use
     if (!opt.enrollName.empty()) {
-        enroll(opt.enrollName, opt.enrollClass, opt.enrollPhotos, opt.wholePhoto, detector, classes,
-               embedders, library, opt.addPhotos);
+        enroll(opt.enrollName, opt.enrollPhotos, detector, classes, faceEmbedder, library,
+               opt.addPhotos);
         return 0;
     }
     if (opt.syncLabels) {
-        syncLabels(library, detector, classes, embedders, true);
+        syncLabels(library, detector, classes, faceEmbedder, true);
         return 0;
     }
-    // Photos added to label folders since the last run are looked at now, with
-    // every detector (so not when one is turned off or didn't load: the labels
-    // then stay as the last sync left them).
+    // Photos added to label folders since the last run are looked at now, for
+    // faces (so not when the face detector is turned off or didn't load: the
+    // labels then stay as the last sync left them).
     bool synced = false;
     if (opt.labels && library.needsSync()) {
-        std::vector<std::string> failed;  // missing, and not turned off
-        for (const std::string& name : missing)
-            if (!(name == "face" && !opt.faces) && !(name == "hand" && !opt.hands))
-                failed.push_back(name);
         if (missing.empty()) {
-            syncLabels(library, detector, classes, embedders, false);
+            syncLabels(library, detector, classes, faceEmbedder, false);
             synced = true;
-        } else if (!failed.empty()) {
-            std::cout << "Label photos changed, but weren't looked at: " << detectorNames(failed)
+        } else if (opt.faces) {
+            std::cout << "Label photos changed, but weren't looked at: " << detectorNames(missing)
                       << " didn't load (see the warning above). Labels not updated.\n";
         } else {
             std::cout << "Label photos changed, but weren't looked at: that needs "
@@ -247,8 +238,9 @@ int main(int argc, char** argv) try {
                          "look at them.\n";
         }
     }
-    // Folders that can't be labels (a bad name or label.yml): a sync can't fix
-    // them, so they're only reported (a sync reports them itself).
+    // Folders that can't be labels (a bad name or label.yml, an earlier version's
+    // object label): a sync can't fix them, so they're only reported (a sync
+    // reports them itself).
     if (opt.labels && !synced)
         for (const LabelFolder& f : library.folders())
             if (!f.problem.empty())
@@ -261,10 +253,9 @@ int main(int argc, char** argv) try {
 
     std::unique_ptr<Recognizer> recognizer;
     if (opt.labels && !library.labels().empty()) {
-        recognizer = std::make_unique<Recognizer>(library, classes, embedders);
-        std::cout << "Labels:";
-        for (const CustomLabel& label : library.labels())
-            std::cout << ' ' << label.name << " (" << label.baseClass << ")";
+        recognizer = std::make_unique<Recognizer>(library, classes, faceEmbedder);
+        std::cout << "Labels (faces):";
+        for (const CustomLabel& label : library.labels()) std::cout << ' ' << label.name;
         std::cout << '\n';
     }
 

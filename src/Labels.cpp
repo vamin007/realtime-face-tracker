@@ -43,15 +43,51 @@ Embedding readEmbedding(const cv::FileNode& node) {
     return Embedding(m.begin<float>(), m.end<float>());
 }
 
-// A yes/no setting: true/false, yes/no, on/off or 1/0.
-bool readFlag(const cv::FileNode& node, const std::string& file) {
-    if (node.isInt()) return static_cast<int>(node) != 0;
-    if (node.isString()) {
-        const std::string v = lower(trim(static_cast<std::string>(node)));
-        if (v == "true" || v == "yes" || v == "on" || v == "1") return true;
-        if (v == "false" || v == "no" || v == "off" || v == "0") return false;
+// Earlier versions also had object labels (a cup, a phone). Why a folder can't
+// be a label if it's one of those; empty if it isn't.
+std::string objectLabelProblem(const LabelSettings& settings, const LabelCache& cache) {
+    const std::string unsupported =
+        "only face labels are supported in this version; its photos are kept";
+    if (!settings.oldClass.empty())
+        return settings.oldClass == kFaceClass
+                   ? ""
+                   : std::string(kSettingsFile) + " sets class: " + settings.oldClass + ", but " +
+                         unsupported;
+    if (!cache.baseClass.empty() && cache.baseClass != kFaceClass)
+        return "it's a " + cache.baseClass + " label made by an earlier version, but " +
+               unsupported;
+    return "";
+}
+
+// The cache that holds a label's samples. The class is face, written as an
+// earlier version reads it: not set in label.yml.
+LabelCache cacheOf(const CustomLabel& label, const fs::path& folder) {
+    LabelCache cache{label.model, kFaceClass, true, false, {}};
+    for (const LabelSample& s : label.samples) {
+        auto r = std::find_if(cache.photos.begin(), cache.photos.end(),
+                              [&](const PhotoRecord& r) { return r.file.name == s.image; });
+        if (r == cache.photos.end()) {
+            PhotoRecord record;
+            record.file.name = s.image;
+            const fs::path photo = folder / s.image;
+            if (fs::exists(photo)) {
+                record.file.size = static_cast<long long>(fs::file_size(photo));
+                record.file.mtime = mtimeOf(photo);
+            }
+            record.used = true;
+            record.note = "kept from before";
+            record.roi = s.roi;
+            cache.photos.push_back(std::move(record));
+            r = cache.photos.end() - 1;
+        }
+        if (s.flipped) {
+            r->mirrored = s.embedding;
+        } else {
+            r->embedding = s.embedding;
+            r->roi = s.roi;
+        }
     }
-    throw std::runtime_error(file + ": " + node.name() + " should be true or false");
+    return cache;
 }
 
 }  // namespace
@@ -125,24 +161,27 @@ LabelSettings readSettings(const std::string& file) {
     } catch (const cv::Exception&) {
     }
     if (!yaml.isOpened() || !yaml.root().isMap())
-        throw std::runtime_error(file +
-                                 " isn't readable; write one setting per line, e.g. class: cup");
+        throw std::runtime_error(
+            file + " isn't readable; write one setting per line, e.g. threshold: 0.45");
     for (const cv::FileNode& node : yaml.root()) {
         const std::string key = node.name();
-        if (key == "class") {
-            if (!node.isString())
-                throw std::runtime_error(file + ": class should be a class name, e.g. cup");
-            s.baseClass = trim(static_cast<std::string>(node));
-        } else if (key == "whole_photo") {
-            s.wholePhoto = readFlag(node, file);
-        } else if (key == "threshold") {
+        if (key == "threshold") {
             const float t = node.isReal() || node.isInt() ? static_cast<float>(node) : -1.0f;
             if (t < 0 || t > 1)
                 throw std::runtime_error(file + ": threshold should be a number from 0 to 1");
             s.threshold = t;
+        } else if (key == "class" || key == "whole_photo") {
+            // An earlier version's settings: every label is a face now, found in each photo.
+            if (key == "class") {
+                if (!node.isString())
+                    throw std::runtime_error(file +
+                                             ": class should be face (every label is a face)");
+                s.oldClass = trim(static_cast<std::string>(node));
+            }
+            s.oldKeys.push_back(key);
         } else {
             throw std::runtime_error(file + ": unknown setting '" + key +
-                                     "' (it can set class, whole_photo and threshold)");
+                                     "' (it can set threshold)");
         }
     }
     return s;
@@ -152,12 +191,8 @@ void writeSettings(const std::string& file, const LabelSettings& settings) {
     cv::FileStorage out(file, cv::FileStorage::WRITE);
     if (!out.isOpened()) throw std::runtime_error("Can't write " + file);
     out.writeComment("Settings for this label. Its photos are the image files in this folder.");
-    out.writeComment("class: what the item is (tracker --list-classes); without it, the class");
-    out.writeComment("       that stands out in the photos is chosen");
-    out.writeComment("whole_photo: true if each photo shows just the item (close-ups)");
-    out.writeComment("threshold: similarity needed to recognize it, 0-1; 0 = the model's default");
-    if (!settings.baseClass.empty()) out << "class" << settings.baseClass;
-    out << "whole_photo" << (settings.wholePhoto ? "true" : "false");
+    out.writeComment("threshold: similarity needed to recognize the face, 0-1; 0 = the model's");
+    out.writeComment("           default");
     out << "threshold" << settings.threshold;
 }
 
@@ -227,20 +262,17 @@ void writeCache(const std::string& file, const LabelCache& cache) {
     fs::rename(temp, file);
 }
 
-SyncPlan planSync(const LabelSettings& settings, const LabelCache& cache,
-                  const std::vector<PhotoFile>& photos, const std::string& model) {
+SyncPlan planSync(const LabelCache& cache, const std::vector<PhotoFile>& photos,
+                  const std::string& model) {
     SyncPlan plan;
-    if (!settings.baseClass.empty() && settings.baseClass != cache.baseClass) {
+    // What an earlier version made differently: an object label whose label.yml
+    // now says class: face, or whole photos (a face is found in each photo now).
+    if (!cache.baseClass.empty() && cache.baseClass != kFaceClass) {
         plan.redoAll = true;
-        if (!cache.baseClass.empty())
-            plan.reason = "its class changed from " + cache.baseClass + " to " + settings.baseClass;
-    } else if (settings.baseClass.empty() && !cache.baseClass.empty() && !cache.autoClass) {
+        plan.reason = "its class changed from " + cache.baseClass + " to face";
+    } else if (cache.wholePhoto) {
         plan.redoAll = true;
-        plan.reason = "label.yml no longer sets its class";
-    } else if (settings.wholePhoto != cache.wholePhoto) {
-        plan.redoAll = true;
-        plan.reason =
-            settings.wholePhoto ? "whole_photo was turned on" : "whole_photo was turned off";
+        plan.reason = "whole photos aren't used any more (the face is found in each photo)";
     } else if (!model.empty() && !cache.model.empty() && cache.model != model) {
         plan.redoAll = true;
         plan.reason = "the embedding model changed";
@@ -263,10 +295,6 @@ SyncPlan planSync(const LabelSettings& settings, const LabelCache& cache,
             plan.keep.push_back(*r);
         }
     }
-    // Without a class there is nothing to keep: when the photos change, the
-    // class is chosen again from all of them.
-    if (cache.baseClass.empty() && (!plan.look.empty() || !plan.removed.empty()))
-        plan.redoAll = true;
     if (plan.redoAll) {
         plan.look = photos;
         plan.keep.clear();
@@ -283,10 +311,11 @@ bool migrateOldLabel(const std::string& folder) {
     const fs::path dir(folder), file = dir / kSettingsFile;
     if (!fs::exists(file)) return false;
     CustomLabel label;
+    std::string baseClass;
     try {
         cv::FileStorage in(file.string(), cv::FileStorage::READ);
         if (!in.isOpened() || in["samples"].empty()) return false;
-        in["base_class"] >> label.baseClass;
+        in["base_class"] >> baseClass;
         in["model"] >> label.model;
         in["threshold"] >> label.threshold;
         for (const cv::FileNode& node : in["samples"]) {
@@ -302,15 +331,21 @@ bool migrateOldLabel(const std::string& folder) {
     }
     label.name = dir.filename().string();
     // --whole-photo stored the whole photo as the item's box.
-    label.wholePhoto = !label.samples.empty();
+    bool wholePhoto = !label.samples.empty();
     for (const LabelSample& s : label.samples) {
-        if (s.flipped || !label.wholePhoto) continue;
+        if (s.flipped || !wholePhoto) continue;
         cv::Mat image;
         if (s.roi.x == 0 && s.roi.y == 0) image = cv::imread((dir / s.image).string());
-        label.wholePhoto = !image.empty() && s.roi == cv::Rect(0, 0, image.cols, image.rows);
+        wholePhoto = !image.empty() && s.roi == cv::Rect(0, 0, image.cols, image.rows);
     }
+    // Written as the earlier version with object labels would read it (the
+    // class in the cache, not in label.yml), so an object label stays usable there.
+    LabelCache cache = cacheOf(label, dir);
+    cache.baseClass = baseClass;
+    cache.wholePhoto = wholePhoto;
     fs::copy_file(file, dir / kOldLabelBackup, fs::copy_options::overwrite_existing);
-    LabelLibrary(dir.parent_path().string()).save(label);
+    writeCache((dir / kCacheFile).string(), cache);
+    writeSettings(file.string(), {label.threshold});
     std::cout << "Converted label '" << label.name << "' to the folder format (the old "
               << kSettingsFile << " is kept as " << (dir / kOldLabelBackup).string() << ")\n";
     return true;
@@ -334,6 +369,8 @@ void LabelLibrary::load() {
         LabelFolder f;
         f.name = path.filename().string();
         f.path = path.string();
+        // Also for a folder with a problem: --remove-label says how many it moves.
+        f.photos = listPhotos(f.path);
         try {
             if (const std::string why = labelNameProblem(f.name); !why.empty())
                 throw std::runtime_error(why + "; rename the folder");
@@ -345,13 +382,17 @@ void LabelLibrary::load() {
             continue;
         }
         readCache((path / kCacheFile).string(), f.cache);
-        f.photos = listPhotos(f.path);
-        f.plan = planSync(f.settings, f.cache, f.photos, "");
+        // An earlier version's object label: left as it is, for a version that can use it.
+        f.problem = objectLabelProblem(f.settings, f.cache);
+        if (!f.problem.empty()) {
+            folders_.push_back(std::move(f));
+            continue;
+        }
+        f.plan = planSync(f.cache, f.photos, "");
 
         // The label as the last sync left it.
-        if (!f.cache.baseClass.empty()) {
-            CustomLabel label{f.name, f.cache.baseClass, f.cache.model, f.settings.threshold,
-                              {},     f.cache.wholePhoto};
+        if (f.cache.baseClass == kFaceClass) {
+            CustomLabel label{f.name, f.cache.model, f.settings.threshold, {}};
             for (const PhotoRecord& r : f.cache.photos) {
                 if (!r.used) continue;
                 label.samples.push_back({r.file.name, r.roi, false, r.embedding});
@@ -367,34 +408,8 @@ void LabelLibrary::load() {
 void LabelLibrary::save(const CustomLabel& label) const {
     const fs::path path = folder(label.name);
     fs::create_directories(path);
-    LabelCache cache{label.model, label.baseClass, false, label.wholePhoto, {}};
-    for (const LabelSample& s : label.samples) {
-        auto r = std::find_if(cache.photos.begin(), cache.photos.end(),
-                              [&](const PhotoRecord& r) { return r.file.name == s.image; });
-        if (r == cache.photos.end()) {
-            PhotoRecord record;
-            record.file.name = s.image;
-            const fs::path photo = path / s.image;
-            if (fs::exists(photo)) {
-                record.file.size = static_cast<long long>(fs::file_size(photo));
-                record.file.mtime = mtimeOf(photo);
-            }
-            record.used = true;
-            record.note = "kept from before";
-            record.roi = s.roi;
-            cache.photos.push_back(std::move(record));
-            r = cache.photos.end() - 1;
-        }
-        if (s.flipped) {
-            r->mirrored = s.embedding;
-        } else {
-            r->embedding = s.embedding;
-            r->roi = s.roi;
-        }
-    }
-    writeCache((path / kCacheFile).string(), cache);
-    writeSettings((path / kSettingsFile).string(),
-                  {label.baseClass, label.wholePhoto, label.threshold});
+    writeCache((path / kCacheFile).string(), cacheOf(label, path));
+    writeSettings((path / kSettingsFile).string(), {label.threshold});
 }
 
 int LabelLibrary::find(const std::string& name) const {
@@ -414,17 +429,10 @@ bool LabelLibrary::needsSync() const {
                        [](const LabelFolder& f) { return f.problem.empty() && !f.plan.empty(); });
 }
 
-bool LabelLibrary::hasLabelsFor(const std::string& baseClass) const {
-    return std::any_of(labels_.begin(), labels_.end(),
-                       [&](const CustomLabel& l) { return l.baseClass == baseClass; });
-}
-
-LabelMatch LabelLibrary::match(const std::string& baseClass, const Embedding& e,
-                               float defaultThreshold, float minMargin) const {
+LabelMatch LabelLibrary::match(const Embedding& e, float defaultThreshold, float minMargin) const {
     LabelMatch best;
     float bestScore = -1;
     for (size_t i = 0; i < labels_.size(); ++i) {
-        if (labels_[i].baseClass != baseClass) continue;
         const float score = labelScore(labels_[i], e);
         if (score > bestScore) {
             best.runnerUp = std::max(bestScore, 0.0f);

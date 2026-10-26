@@ -1,11 +1,8 @@
 #pragma once
-#include <memory>
 #include <opencv2/core.hpp>
 #include <opencv2/objdetect.hpp>
 #include <string>
 #include <vector>
-
-#include "OrtModel.h"
 
 // A neural network's summary of an image crop, normalized to length 1: crops
 // of the same item point in nearly the same direction, so the dot product of
@@ -25,44 +22,30 @@ public:
     // to straighten the face first. Empty if the box is unusable.
     virtual Embedding embed(const cv::Mat& frame, const cv::Rect2f& box,
                             const std::vector<cv::Point2f>& keypoints) = 0;
+    // Loads the model now if it's loaded on first use, so errors show up at startup.
+    virtual void load() {}
 };
 
-// Faces: SFace (OpenCV's FaceRecognizerSF), trained to tell people apart.
+// Faces: SFace (OpenCV's FaceRecognizerSF), trained to tell people apart. The
+// model is loaded on first use, so a run without labels never needs it. Not
+// thread-safe: load() it before embedding on another thread.
 class FaceEmbedder : public IEmbedder {
 public:
     static constexpr const char* kModelId = "sface-2021dec";
     static constexpr float kThreshold = 0.363f;  // OpenCV's recommended cosine threshold for SFace
 
-    explicit FaceEmbedder(const std::string& modelPath);
+    explicit FaceEmbedder(std::string modelPath) : modelPath_(std::move(modelPath)) {}
     std::string modelId() const override { return kModelId; }
     float defaultThreshold() const override { return kThreshold; }
     Embedding embed(const cv::Mat& frame, const cv::Rect2f& box,
                     const std::vector<cv::Point2f>& keypoints) override;
+    void load() override;
 
 private:
+    std::string modelPath_;
     cv::Ptr<cv::FaceRecognizerSF> net_;
 };
 
-// Objects: DINOv2-small, averaged over its image patches, which is good at
-// telling one specific thing (this mug) from other things. On the flashlight
-// clip the same phone scored 0.77 typically (0.57 at the 10th percentile) and
-// other objects 0.29 (0.57 at the 90th), hence the 0.6 threshold.
-class ObjectEmbedder : public IEmbedder {
-public:
-    static constexpr const char* kModelId = "dinov2-small-patchmean";
-    static constexpr float kThreshold = 0.6f;
-
-    ObjectEmbedder(const std::string& modelPath, Backend backend, const std::string& cacheDir);
-    std::string modelId() const override { return kModelId; }
-    float defaultThreshold() const override { return kThreshold; }
-    Embedding embed(const cv::Mat& frame, const cv::Rect2f& box,
-                    const std::vector<cv::Point2f>& keypoints) override;
-    std::string info() const { return model_->backendInfo(); }
-
-private:
-    std::unique_ptr<OrtModel> model_;
-};
-
-// Mirrors a box and its keypoints left-right within an image `width` wide. Face
-// landmarks also swap sides (the right eye becomes the left one).
-void mirrorDetection(int width, cv::Rect2f& box, std::vector<cv::Point2f>& keypoints, bool isFace);
+// Mirrors a face box and its landmarks left-right within an image `width` wide.
+// The landmarks also swap sides (the right eye becomes the left one).
+void mirrorDetection(int width, cv::Rect2f& box, std::vector<cv::Point2f>& keypoints);

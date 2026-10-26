@@ -4,37 +4,33 @@
 
 #include "ClassRegistry.h"
 #include "Detector.h"
+#include "Embedder.h"
 #include "Labels.h"
-#include "Recognizer.h"
 
 // Brings every label folder up to date with its photos: photos added or
-// changed since the last sync are looked at (the item found with the detectors
-// and embedded, plus a mirrored copy), removed ones are dropped, and new
-// folders become labels. A label's class comes from its label.yml, or else is
-// the one most prominent across its photos (a face rather than the whole
-// person), and stays once chosen. Prints what changed, and warns about unusable
+// changed since the last sync are looked at (the face found with the face
+// detector and embedded, plus a mirrored copy), removed ones are dropped, and
+// new folders become labels. Prints what changed, and warns about unusable
 // photos, labels with few usable photos, photos that don't look like the rest
 // and labels that look alike; `all` reports on unchanged labels as well.
 // Reloads the library. Returns the number of labels that changed.
 int syncLabels(LabelLibrary& library, Detector& detector, const ClassRegistry& classes,
-               Embedders& embedders, bool all);
+               IEmbedder& embedder, bool all);
 
 // The detectors a sync needs that aren't among `loaded` (Detector::names()). A
-// sync looks for every class in the photos, so it needs yolo, face and hand:
-// without one, photos of its classes would be recorded as showing nothing (or
-// a label's class chosen wrongly), and not looked at again once it's back.
+// sync looks for faces in the photos, so it needs the face detector: without
+// it, photos would be recorded as showing no face, and not looked at again
+// once it's back.
 std::vector<std::string> missingForSync(const std::vector<std::string>& loaded);
 
-// Teaches the tracker a specific item from photos: copies them into
-// <labels>/<name>/ and syncs. `classHint` (e.g. "cup") and `wholePhoto` (each
-// photo shows just the item) are saved in the label's label.yml. Enrolling an
-// existing name adds photos to it; with `mustExist` the label has to exist.
-void enroll(const std::string& name, const std::string& classHint,
-            const std::vector<std::string>& images, bool wholePhoto, Detector& detector,
-            const ClassRegistry& classes, Embedders& embedders, LabelLibrary& library,
+// Teaches the tracker a person's face from photos: copies them into
+// <labels>/<name>/ and syncs. Enrolling an existing name adds photos to it;
+// with `mustExist` the label has to exist.
+void enroll(const std::string& name, const std::vector<std::string>& images, Detector& detector,
+            const ClassRegistry& classes, IEmbedder& embedder, LabelLibrary& library,
             bool mustExist = false);
 
-// Prints each label: its class, photos, usable photos and changes not synced yet.
+// Prints each label: its photos, usable photos and changes not synced yet.
 void listLabels(const LabelLibrary& library);
 // Renames a label's folder.
 void renameLabel(const std::string& from, const std::string& to, const LabelLibrary& library,

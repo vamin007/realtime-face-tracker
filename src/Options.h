@@ -21,7 +21,7 @@ struct Options {
     bool realtime = false;  // play the video at its own speed, skipping frames when busy
     Backend backend = Backend::CoreML;
     ModelPath yoloModel, faceModel, handModel;  // detectors
-    ModelPath faceIdModel, objectIdModel;       // recognition (custom labels)
+    ModelPath faceIdModel;                      // face recognition (custom labels)
     std::string names, logDir, cacheDir, labelsDir;
     bool log = true;
     bool mirror = true;
@@ -42,9 +42,7 @@ struct Options {
     std::string removeLabel;
     std::string renameLabel, renameTo;
     std::string enrollName;  // --enroll NAME photo... (or --add-photos NAME photo...)
-    std::string enrollClass;
-    bool wholePhoto = false;  // each enrollment photo shows just the item
-    bool addPhotos = false;   // --add-photos: the label must exist already
+    bool addPhotos = false;  // --add-photos: the label must exist already
     std::vector<std::string> enrollPhotos;
 
     // Developer options
