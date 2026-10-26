@@ -1,5 +1,4 @@
 #pragma once
-#include <map>
 #include <memory>
 #include <opencv2/core.hpp>
 #include <string>
@@ -13,9 +12,8 @@ enum class Backend { CoreML, Cpu };
 class OrtModel {
 public:
     // cacheDir: where CoreML keeps its compiled copy of the model, so later
-    // launches skip the compile. freeDims: values for named dynamic dimensions.
-    OrtModel(const std::string& path, Backend backend, const std::string& cacheDir,
-             const std::map<std::string, int64_t>& freeDims = {});
+    // launches skip the compile.
+    OrtModel(const std::string& path, Backend backend, const std::string& cacheDir);
     ~OrtModel();
     OrtModel(const OrtModel&) = delete;
     OrtModel& operator=(const OrtModel&) = delete;
