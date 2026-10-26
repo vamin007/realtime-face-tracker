@@ -10,7 +10,7 @@
 namespace {
 
 constexpr double kFrame = 1.0 / 30;  // seconds between frames
-constexpr ClassId kPerson = 0, kTv = 62, kLaptop = 63;
+constexpr ClassId kPerson = 0;
 
 Detection det(float x, float y, ClassId cls = kPerson, float size = 50, float conf = 0.9f) {
     Detection d;
@@ -46,7 +46,7 @@ protected:
         return ids;
     }
 
-    ClassRegistry classes = ClassRegistry::fromFile(PROJECT_DIR "/models/coco.names");
+    ClassRegistry classes;  // person, hand, face
     long long frame_ = 0;
     std::set<int> seen_;                   // every id that was ever visible
     std::map<int, float> firstX_, lastX_;  // where each id was first and last seen
@@ -74,13 +74,6 @@ TEST_F(TrackerTest, SlowMovingObjectKeepsOneId) {
 TEST_F(TrackerTest, FastSmallObjectKeepsOneId) {
     Tracker tracker(classes);
     for (int f = 0; f < 30; ++f) step(tracker, {det(50 + 30.0f * f, 200, kPerson, 40)});
-    EXPECT_EQ(seen_.size(), 1u);
-}
-
-// YOLO often flips between similar labels (tv/laptop); the track survives it.
-TEST_F(TrackerTest, ClassFlickerKeepsOneId) {
-    Tracker tracker(classes);
-    for (int f = 0; f < 40; ++f) step(tracker, {det(200, 200, (f / 4) % 2 ? kLaptop : kTv, 120)});
     EXPECT_EQ(seen_.size(), 1u);
 }
 
@@ -167,11 +160,12 @@ TEST_F(TrackerTest, BoxStaysVisibleThroughBriefDropOut) {
     EXPECT_TRUE(visibleIds(tracker).empty()) << "hidden after the coast time";
 }
 
-TEST_F(TrackerTest, FacesAndHandsNeverShareATrack) {
+TEST_F(TrackerTest, PeopleFacesAndHandsNeverShareATrack) {
     Tracker tracker(classes);
     for (int f = 0; f < 5; ++f)
-        step(tracker, {det(100, 100, classes.face()), det(100, 100, classes.hand())});
-    EXPECT_EQ(visibleIds(tracker).size(), 2u);
+        step(tracker, {det(100, 100, kPerson), det(100, 100, classes.face()),
+                       det(100, 100, classes.hand())});
+    EXPECT_EQ(visibleIds(tracker).size(), 3u);
 }
 
 TEST_F(TrackerTest, WeakDetectionsNeverStartATrack) {
@@ -192,20 +186,18 @@ TEST_F(TrackerTest, WeakDetectionsKeepATrackGoing) {
     EXPECT_EQ(seen_.size(), 1u);
 }
 
-// A false object detection that once got confirmed mustn't live on weak detections.
+// A false person detection that once got confirmed mustn't live on weak detections.
 TEST_F(TrackerTest, WeakDetectionsAloneDontKeepATrackForever) {
     Tracker tracker(classes);
-    const ClassId toilet = classes.find("toilet");
-    for (int f = 0; f < 5; ++f) step(tracker, {det(300, 300, toilet)});
-    for (int f = 0; f < 40; ++f) step(tracker, {weakDet(300, 300, toilet)});  // 1.3 s
+    for (int f = 0; f < 5; ++f) step(tracker, {det(300, 300)});
+    for (int f = 0; f < 40; ++f) step(tracker, {weakDet(300, 300)});  // 1.3 s
     EXPECT_TRUE(visibleIds(tracker).empty()) << "hidden after a second of weak detections";
-    for (int f = 0; f < 120; ++f) step(tracker, {weakDet(300, 300, toilet)});  // 5.3 s in total
+    for (int f = 0; f < 120; ++f) step(tracker, {weakDet(300, 300)});  // 5.3 s in total
     EXPECT_TRUE(tracker.tracks().empty()) << "dropped after the weak timeout";
 }
 
-// The hand model's weak detections are reliable: a hand seen only weakly stays shown.
 // The hand model's weak detections are more reliable than YOLO's: a hand seen
-// only weakly stays shown for 2 s (an object for 1 s), and keeps its ID longer.
+// only weakly stays shown for 2 s (a person for 1 s), and keeps its ID longer.
 TEST_F(TrackerTest, WeaklySeenHandStaysVisibleLonger) {
     Tracker tracker(classes);
     for (int f = 0; f < 5; ++f) step(tracker, {det(300, 300, classes.hand())});
@@ -275,17 +267,6 @@ TEST_F(TrackerTest, NumbersAreNotReused) {
     EXPECT_EQ(tracker.tracks().front().number, 2);
 }
 
-TEST_F(TrackerTest, LastingClassChangeGetsANumberInTheNewClass) {
-    Tracker tracker(classes);
-    for (int f = 0; f < 5; ++f) step(tracker, {det(200, 200, kTv, 120)});
-    for (int f = 0; f < 20; ++f) step(tracker, {det(200, 200, kLaptop, 120)});
-    ASSERT_EQ(tracker.tracks().size(), 1u);
-    const Track& t = tracker.tracks().front();
-    EXPECT_EQ(t.classId, kLaptop);
-    EXPECT_EQ(t.number, 1);
-    EXPECT_EQ(seen_.size(), 1u) << "same track, just relabeled";
-}
-
 // The detector missing an object for a frame or two doesn't change how its box
 // is drawn; a longer gap shows it as a prediction (thin), then hides it.
 TEST_F(TrackerTest, BriefDropOutIsNotDrawnAsAPrediction) {
@@ -313,22 +294,6 @@ TEST_F(TrackerTest, WeakDetectionsDontReviveALostTrack) {
     step(tracker, {det(300, 300, classes.hand())});
     EXPECT_EQ(visibleIds(tracker).size(), 1u);
     EXPECT_EQ(seen_.size(), 1u) << "same track as before";
-}
-
-// YOLO calling one object tv, then laptop, then tv again: it keeps the tv number.
-TEST_F(TrackerTest, ClassChangeBackKeepsItsNumber) {
-    Tracker tracker(classes);
-    for (int f = 0; f < 10; ++f) step(tracker, {det(200, 200, kTv, 120)});
-    for (int f = 0; f < 40; ++f) step(tracker, {det(200, 200, kLaptop, 120)});
-    ASSERT_EQ(tracker.tracks().size(), 1u);
-    EXPECT_EQ(tracker.tracks().front().classId, kLaptop);
-    for (int f = 0; f < 40; ++f) step(tracker, {det(200, 200, kTv, 120)});
-    EXPECT_EQ(tracker.tracks().front().classId, kTv);
-    EXPECT_EQ(tracker.tracks().front().number, 1);
-    for (int f = 0; f < 5; ++f) step(tracker, {det(200, 200, kTv, 120), det(700, 400, kTv, 120)});
-    std::set<int> numbers;
-    for (const Track& t : tracker.tracks()) numbers.insert(t.number);
-    EXPECT_EQ(numbers, (std::set<int>{1, 2})) << "the next tv still gets a new number";
 }
 
 // A waved hand: the shown box stays on the hand instead of trailing behind it.

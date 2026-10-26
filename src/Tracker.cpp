@@ -48,7 +48,7 @@ bool Tracker::touchesEdge(const cv::Rect2f& box) const {
 
 // Cost of pairing track t with detection d (lower is better), or -1 if they can't match.
 float Tracker::pairCost(const Track& t, const Detection& d, double now, bool weak) const {
-    if (kindOf(t.classId) != kindOf(d.classId)) return -1;
+    if (t.classId != d.classId) return -1;
     // Sizes: the track's typical size (not shrunk by the frame edge) and the detection's.
     const float trackSize = t.refSize > 0 ? t.refSize : sizeOf(t.box);
     const float detSize = sizeOf(d.box);
@@ -71,14 +71,7 @@ float Tracker::pairCost(const Track& t, const Detection& d, double now, bool wea
                                      params_.maxDistance + params_.lostSearchGrowth * unseen);
         if (overlap < params_.minIou && distance > limit) return -1;
     }
-    float cost = (1 - overlap) + kDistanceWeight * distance;
-    if (t.classId != d.classId) {
-        // Another class is the same object only if the boxes nearly coincide (tv
-        // vs laptop); otherwise a track would swallow neighboring objects.
-        if (overlap < params_.classChangeMinIou) return -1;
-        cost += params_.classChangeCost;
-    }
-    return cost;
+    return (1 - overlap) + kDistanceWeight * distance;
 }
 
 void Tracker::match(const std::vector<size_t>& trackIdx, const std::vector<size_t>& detIdx,
@@ -114,27 +107,9 @@ void Tracker::applyMatch(Track& t, const Detection& d, double now) {
     t.keypoints = d.keypoints;
     if (!t.atEdge) t.refSize = (1 - kSizeSmoothing) * t.refSize + kSizeSmoothing * sizeOf(d.box);
     ++t.hits;
-    voteClass(t, d);
     if (!t.confirmed && t.hits >= params_.minHits) confirm(t);
     t.trail.push_back(center(t.box));
     if (t.trail.size() > params_.trailLength) t.trail.pop_front();
-}
-
-// Objects can be reported under different classes from frame to frame (tv and
-// laptop); the track keeps one identity and shows the class seen most lately.
-void Tracker::voteClass(Track& t, const Detection& d) {
-    for (auto& [cls, votes] : t.classVotes) votes *= params_.voteDecay;
-    t.classVotes[d.classId] += d.conf;
-    if (d.classId == t.classId) return;
-    if (t.classVotes[d.classId] < params_.classSwitchMargin * t.classVotes[t.classId]) return;
-    t.classId = d.classId;
-    // Now a different kind of thing: it takes the next number of that class, or
-    // the one it had before if it was this class earlier (chair -> tv -> chair).
-    if (t.confirmed) {
-        int& number = t.numbers[t.classId];
-        if (number == 0) number = ++lastNumber_[t.classId];
-        t.number = number;
-    }
 }
 
 Track Tracker::createTrack(const Detection& d, double now) {
@@ -152,7 +127,6 @@ Track Tracker::createTrack(const Detection& d, double now) {
     t.keypoints = d.keypoints;
     t.atEdge = touchesEdge(d.box);
     t.refSize = sizeOf(d.box);
-    t.classVotes[d.classId] = d.conf;
     t.trail.push_back(center(t.box));
     if (params_.minHits <= 1) confirm(t);
     return t;
@@ -162,7 +136,7 @@ Track Tracker::createTrack(const Detection& d, double now) {
 // never get shown don't use them up.
 void Tracker::confirm(Track& t) {
     t.confirmed = true;
-    t.number = t.numbers[t.classId] = ++lastNumber_[t.classId];
+    t.number = ++lastNumber_[t.classId];
 }
 
 void Tracker::update(const std::vector<Detection>& detections, double now) {
@@ -214,8 +188,7 @@ void Tracker::update(const std::vector<Detection>& detections, double now) {
     for (size_t i : unused(strong)) {
         const Detection& d = detections[i];
         const bool duplicate = std::any_of(tracks_.begin(), tracks_.end(), [&](const Track& t) {
-            return t.matched && kindOf(t.classId) == kindOf(d.classId) &&
-                   iou(t.box, d.box) > params_.duplicateIou;
+            return t.matched && t.classId == d.classId && iou(t.box, d.box) > params_.duplicateIou;
         });
         if (!duplicate) tracks_.push_back(createTrack(d, now));
     }
@@ -236,8 +209,8 @@ void Tracker::update(const std::vector<Detection>& detections, double now) {
             frameSize_.empty() ||
             (t.box & cv::Rect2f(0, 0, frameSize_.width, frameSize_.height)).area() > 0;
         // A track seen only weakly for a while is hidden (it may be a false
-        // detection). YOLO's weak detections (80 classes) are wrong more often than
-        // the face and hand models', so objects are hidden sooner.
+        // detection). YOLO's weak detections are wrong more often than the face
+        // and hand models', so people are hidden sooner.
         const double bridge = kindOf(t.classId) == ClassKind::Object ? params_.weakBridge
                                                                      : params_.weakBridgeFaceHand;
         const bool weakOnlyTooLong = now - t.lastStrong > bridge;

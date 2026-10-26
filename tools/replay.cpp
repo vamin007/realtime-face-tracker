@@ -9,7 +9,7 @@
 //
 // Besides IDs it reports, per class:
 //   flicker: shown boxes that disappear and come back (gaps), switch to a thin
-//            predicted box (thin), change class (cls) or number (num); wobble
+//            predicted box (thin) or change number (num); wobble
 //            (jitter: the second difference of the box center, median and 90th
 //            percentile; slow90: only while it moves under 1 box size per second)
 //            and frame-to-frame width changes; how long a box stays up after the
@@ -99,10 +99,7 @@ bool setParam(TrackerParams& p, const std::string& assignment) {
         {"lostSearchGrowth", [&](double x) { p.lostSearchGrowth = static_cast<float>(x); }},
         {"maxLostDistance", [&](double x) { p.maxLostDistance = static_cast<float>(x); }},
         {"weakMinIou", [&](double x) { p.weakMinIou = static_cast<float>(x); }},
-        {"classChangeCost", [&](double x) { p.classChangeCost = static_cast<float>(x); }},
         {"duplicateIou", [&](double x) { p.duplicateIou = static_cast<float>(x); }},
-        {"voteDecay", [&](double x) { p.voteDecay = static_cast<float>(x); }},
-        {"classSwitchMargin", [&](double x) { p.classSwitchMargin = static_cast<float>(x); }},
         {"accelPos", [&](double x) { p.kalman.accelPos = static_cast<float>(x); }},
         {"accelSize", [&](double x) { p.kalman.accelSize = static_cast<float>(x); }},
         {"measurePos", [&](double x) { p.kalman.measurePos = static_cast<float>(x); }},
@@ -124,7 +121,6 @@ struct Sample {
     double time;  // s
     bool matched, coasting;
     cv::Rect2f box, detected;
-    ClassId cls;
     int number;
 };
 
@@ -145,7 +141,7 @@ double mean(const std::vector<double>& v) {
 
 // Flicker and lag of one class's tracks (see the top of the file).
 struct Steadiness {
-    long long gaps = 0, thin = 0, classChanges = 0, numberChanges = 0;
+    long long gaps = 0, thin = 0, numberChanges = 0;
     std::vector<double> jitter;              // % of box size
     std::vector<double> slowJitter;          // ... while the box moves slowly (visible as wobble)
     std::vector<double> sizeJitter;          // frame-to-frame change of the width, %
@@ -186,7 +182,6 @@ struct Steadiness {
             i = j - 1;
         }
         for (size_t i = 1; i < s.size(); ++i) {
-            classChanges += s[i].cls != s[i - 1].cls;
             numberChanges += s[i].number != s[i - 1].number;
             if (s[i].frame != s[i - 1].frame + 1) {
                 ++gaps;
@@ -278,8 +273,8 @@ int main(int argc, char** argv) try {
             it->second.last = f;
             it->second.lastBox = t.box;
             ++it->second.visibleFrames;
-            samples[t.id].push_back({f, frames[f].timeMs / 1000.0, t.matched, t.coasting, t.box,
-                                     t.detected, t.classId, t.number});
+            samples[t.id].push_back(
+                {f, frames[f].timeMs / 1000.0, t.matched, t.coasting, t.box, t.detected, t.number});
         }
         for (const auto& [cls, n] : dets) {
             detected[cls] += n;
@@ -308,16 +303,14 @@ int main(int argc, char** argv) try {
         frames.size() > 1 ? (frames.back().timeMs - frames.front().timeMs) / 60000.0 : 1.0;
     std::printf(
         "\nFlicker (counts per minute; jitter and size changes in %% of the box size)\n"
-        "%-12s%6s%6s%6s%6s |%7s%7s%7s |%7s%7s |%9s\n",
-        "class", "gaps", "thin", "cls", "num", "jit50", "jit90", "slow90", "size90", "slow90",
-        "ghost ms");
+        "%-12s%6s%6s%6s |%7s%7s%7s |%7s%7s |%9s\n",
+        "class", "gaps", "thin", "num", "jit50", "jit90", "slow90", "size90", "slow90", "ghost ms");
     for (const auto& [cls, s] : steadiness)
-        std::printf("%-12s%6.1f%6.1f%6.1f%6.1f |%7.1f%7.1f%7.1f |%7.1f%7.1f |%9.0f\n",
+        std::printf("%-12s%6.1f%6.1f%6.1f |%7.1f%7.1f%7.1f |%7.1f%7.1f |%9.0f\n",
                     classes.name(cls).c_str(), s.gaps / minutes, s.thin / minutes,
-                    s.classChanges / minutes, s.numberChanges / minutes, percentile(s.jitter, 50),
-                    percentile(s.jitter, 90), percentile(s.slowJitter, 90),
-                    percentile(s.sizeJitter, 90), percentile(s.slowSizeJitter, 90),
-                    mean(s.ghostMs));
+                    s.numberChanges / minutes, percentile(s.jitter, 50), percentile(s.jitter, 90),
+                    percentile(s.slowJitter, 90), percentile(s.sizeJitter, 90),
+                    percentile(s.slowSizeJitter, 90), mean(s.ghostMs));
     std::printf(
         "\nLag (shown box vs detection, %% of the box size)\n"
         "%-12s%7s%7s |%7s%7s%7s%9s |%7s%7s%7s\n",
