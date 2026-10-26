@@ -183,7 +183,7 @@ protected:
 
     fs::path root;
     std::string dir;
-    ClassRegistry classes{{"person"}};
+    ClassRegistry classes;
     Detector detector;
     RedFaceDetector* faceDetector = nullptr;   // owned by detector
     PersonDetector* personDetector = nullptr;  // owned by detector
@@ -721,7 +721,7 @@ TEST(SyncDetectors, ASyncNeedsOnlyTheFaceDetector) {
 TEST(SyncDetectors, TheRealFaceDetectorIsEnough) {
     const std::string face = PROJECT_DIR "/models/face_detection_yunet_2023mar.onnx";
     if (!fs::exists(face)) GTEST_SKIP() << "missing " << face;
-    const ClassRegistry classes({"person"});
+    const ClassRegistry classes;
     Detector detector;
     detector.add(std::make_unique<FaceDetector>(face, classes.face(), DetectorThresholds{0.6f}));
     EXPECT_TRUE(missingForSync(detector.names()).empty());

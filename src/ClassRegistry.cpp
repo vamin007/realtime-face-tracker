@@ -1,43 +1,18 @@
 #include "ClassRegistry.h"
 
-#include <fstream>
 #include <stdexcept>
 
 namespace {
 
 const std::string kUnknown = "unknown";
 
-std::string trim(const std::string& s) {
-    const auto first = s.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos) return "";
-    const auto last = s.find_last_not_of(" \t\r\n");
-    return s.substr(first, last - first + 1);
-}
-
 }  // namespace
 
 // Of YOLO's 80 COCO classes only person is tracked; YoloDetector skips the rest.
-ClassRegistry::ClassRegistry() : ClassRegistry(std::vector<std::string>{"person"}) {}
-
-ClassRegistry::ClassRegistry(const std::vector<std::string>& cocoNames) {
-    for (const std::string& raw : cocoNames) {
-        const std::string name = trim(raw);
-        // Older names files listed hand and face as well; they're built in now.
-        if (name.empty() || name == "hand" || name == "face") continue;
-        add(name, ClassKind::Object, -1);
-    }
-    cocoCount_ = size();
-    person_ = find("person");
+ClassRegistry::ClassRegistry() {
+    person_ = add("person", ClassKind::Object, -1);
     hand_ = add("hand", ClassKind::Hand, -1);
     face_ = add("face", ClassKind::Face, -1);
-}
-
-ClassRegistry ClassRegistry::fromFile(const std::string& cocoNamesPath) {
-    std::ifstream in(cocoNamesPath);
-    if (!in) throw std::runtime_error("Failed to open class names: " + cocoNamesPath);
-    std::vector<std::string> names;
-    for (std::string line; std::getline(in, line);) names.push_back(line);
-    return ClassRegistry(names);
 }
 
 ClassId ClassRegistry::addCustom(const std::string& name, ClassId baseClass) {
