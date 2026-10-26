@@ -6,54 +6,62 @@
 #include "ClassRegistry.h"
 #include "Tracker.h"
 
-// Picks a TARGET: the face that a bright light has just started shining on.
+// Picks a TARGET: the face a red laser dot is on.
 //
-// For every face: ratio = face brightness / background brightness (so room
-// lighting doesn't matter), and its "normal" ratio, learned while it isn't lit.
-// A face becomes the target when its ratio is both high (brighter than the
-// room) and has risen well above its normal (a light just hit it). Only faces
-// are ever measured; a bright phone, lamp or window can't become the target.
-// Defaults come from the flashlight reference clip: unlit, the face/room ratio
-// was 0.72-0.78 (a bright room); lit, 1.2-1.8 (a rise of 1.5-2x); right after
-// the light went off it dipped to ~0.5 for a second while the camera's exposure
-// recovered.
+// The dot must be on the face itself, not just inside its box: the face's
+// outline is an oval built from its landmarks (eyes, nose, mouth), the dot's
+// center must be inside it, and the pixels around the dot must look like that
+// face's skin. A dot on the hair, an ear, the wall behind the head or a hand in
+// front of the face doesn't count.
+//
+// A laser dot on a camera image is small, far redder and brighter than the skin
+// around it, and often overexposed to white in the middle with a red rim. Red
+// is judged against the face's own skin (its median color), so skin tone,
+// lighting and white balance don't matter, and red lips or a lit face don't
+// pass for a dot.
 struct TargetParams {
-    float minRatio = 1.0f;      // a lit face is at least as bright as the room
-    float minRise = 1.35f;      // ... and its ratio at least this much above normal
-    float releaseRise = 1.2f;   // the target is released below this rise
-    double enterTime = 0.1;     // s the lit condition must hold to become the target
-    double releaseTime = 0.25;  // s below the release level before letting go
-    double learnTime = 1.0;     // s a face must be watched before it can become a target
-    // The normal ratio follows the face quickly while it's near normal, and only
-    // slowly otherwise, so a lit period (or the dark dip after one) doesn't drag
-    // it along but a lasting change in the room is still absorbed.
-    float normalBand = 0.15f;         // "near normal": rise within 1 +- this
-    double normalTimeConstant = 3.0;  // s, near normal
-    double driftTimeConstant = 20.0;  // s, outside the band
-    float switchMargin = 0.2f;   // another face takes over only if its ratio is this much higher
-    double coastTime = 0.75;     // s the target stays on while its face can't be measured
-    float maxHandCover = 0.25f;  // a face covered more than this by a hand isn't measured
-    double handRecent = 0.5;     // s: ... if that hand was confidently detected this recently
+    // A dot pixel: red at least this much above the skin's (red minus the larger
+    // of green and blue) ...
+    float minRednessAbove = 60;
+    float minRed = 180;  // ... with a red channel at least this bright, 0..255
+    float coreLevel = 235;  // overexposed core: every channel at least this (next to red)
+    // The dot: at least this many pixels, at most this share of the face's oval,
+    // and roughly round.
+    int minArea = 3;
+    float maxAreaShare = 0.02f;
+    float minFill = 0.3f;       // its pixels / its bounding box
+    float maxElongation = 3.0f;  // longer side / shorter side of its bounding box
+    float minSkinAround = 0.6f;  // share of the ring around it that is this face's skin
+    float skinTolerance = 50;    // a ring pixel is skin within this of the skin's median, per channel
+
+    double enterTime = 0.1;    // s the dot must stay on the face to make it the target
+    double dropTime = 0.15;    // s without the dot before it counts as gone (camera misses)
+    double releaseTime = 0.3;  // s without the dot before the target is released
+    double coastTime = 0.75;   // s the target stays on while its face isn't detected
+    double handRecent = 0.5;   // s: a hand detected confidently this recently hides what's behind it
 };
 
-// Brightness state of one face track.
-struct FaceLight {
-    double firstSeen = 0;
-    double lastUpdate = 0;
-    double measuredAt = -1;  // last time its brightness was measured
-    bool blocked = false;    // not measured this frame (not detected, or a hand in front)
-    float faceLuma = 0;      // mean brightness of the middle of the face, 0..255
-    float ratio = 0;         // faceLuma / background brightness, this frame
-    float normalRatio = 0;   // its usual value
-    double litSince = -1;    // when the lit condition started holding; -1 if it isn't
-    float rise() const { return normalRatio > 0 ? ratio / normalRatio : 0; }
+// What the laser search found on one face.
+struct LaserDot {
+    bool found = false;
+    cv::Point2f center;    // frame pixels
+    int area = 0;          // pixels
+    float redness = 0;     // mean redness of the dot minus the skin's
+    float skinAround = 0;  // share of the ring around it that is skin
+};
+
+// Laser state of one face track.
+struct FaceLaser {
+    bool checked = false;  // looked at this frame (detected now, so its landmarks are fresh)
+    LaserDot dot;          // this frame's result
+    double onSince = -1;   // the dot has been on the face since; -1 if it isn't
+    double lastDot = -1;   // last time a dot was seen on it
 };
 
 struct Target {
     int trackId = -1;  // -1: no target
     cv::Rect2f box;
-    float ratio = 0;
-    float rise = 0;
+    cv::Point2f dot;  // where the laser was last seen on it
     bool active() const { return trackId >= 0; }
 };
 
@@ -61,28 +69,37 @@ class TargetSelector {
 public:
     explicit TargetSelector(const ClassRegistry& classes, TargetParams params = {});
 
-    // Measures the faces in this frame (before anything is drawn on it) and
-    // updates the target.
+    // Looks for the laser on each face in this frame (before anything is drawn
+    // on it) and updates the target.
     const Target& update(const cv::Mat& frame, const std::vector<Track>& tracks, double now);
 
     const Target& target() const { return target_; }
-    const std::map<int, FaceLight>& faces() const { return faces_; }  // by track id
-    float background() const { return background_; }
+    const std::map<int, FaceLaser>& faces() const { return faces_; }  // by track id
 
 private:
     bool isFace(const Track& t) const;
+    bool dotOn(const FaceLaser& f, double now) const;
 
     const ClassRegistry& classes_;
     TargetParams params_;
-    std::map<int, FaceLight> faces_;
+    std::map<int, FaceLaser> faces_;
     Target target_;
-    double releaseSince_ = -1;  // when the target's rise first fell below the release level
-    double targetSeen_ = 0;     // when the target's face was last detected
-    float background_ = 0;
+    double targetSeen_ = 0;  // when the target's face was last detected
 };
 
-// Mean brightness (luma, 0..255) of the middle `keep` fraction of a box.
-float meanLuma(const cv::Mat& frame, const cv::Rect2f& box, float keep = 0.6f);
+// The face's outline from its box and 5 landmarks (right eye, left eye, nose,
+// right and left mouth corner): forehead to chin, cheek to cheek, tilted with
+// the eyes. Without landmarks, an oval inside the middle of the box.
+cv::RotatedRect faceOval(const cv::Rect2f& box, const std::vector<cv::Point2f>& landmarks);
 
-// Median brightness of the frame outside the given boxes, on a small copy of the frame.
-float backgroundLuma(const cv::Mat& frame, const std::vector<cv::Rect2f>& exclude);
+// The outline of a hand from its 7 palm keypoints (wrist, the four finger
+// bases, two thumb points): the palm, the fingers reaching out from their bases
+// along the hand, and the thumb. Much tighter than its box when the hand is
+// tilted. Without keypoints, its box.
+std::vector<cv::Point> handShape(const cv::Rect2f& box, const std::vector<cv::Point2f>& keypoints);
+
+// Looks for a laser dot on the face inside `oval`, ignoring anything inside the
+// `hidden` outlines (hands in front of the face).
+LaserDot findLaserDot(const cv::Mat& frame, const cv::RotatedRect& oval,
+                      const std::vector<std::vector<cv::Point>>& hidden,
+                      const TargetParams& params = {});

@@ -16,7 +16,7 @@ Logger::Logger(const std::string& logDir) {
 
     out_.open(path_);
     if (!out_) throw std::runtime_error("Failed to open log file: " + path_);
-    out_ << "time_ms,frame,id,number,class,label,matched,x,y,w,h,conf,target,light_ratio,"
+    out_ << "time_ms,frame,id,number,class,label,matched,x,y,w,h,conf,target,laser,"
             "coasting\n";
 }
 
@@ -34,7 +34,8 @@ void Logger::log(long long frameIndex, double timeMs, const std::vector<Track>& 
              << static_cast<int>(t.box.height) << ',' << t.conf << ',' << (isTarget ? 1 : 0) << ',';
         if (targeting) {
             const auto it = targeting->faces().find(t.id);
-            if (it != targeting->faces().end()) out_ << it->second.ratio;
+            if (it != targeting->faces().end() && it->second.dot.found)
+                out_ << it->second.dot.redness;
         }
         out_ << ',' << (t.coasting ? 1 : 0) << '\n';
     }

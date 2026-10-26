@@ -48,7 +48,7 @@ struct Options {
     // Developer options
     long long maxFrames = 0;     // stop after this many frames; 0 = no limit
     std::string dumpDetections;  // CSV of every raw detection per frame
-    std::string dumpLight;       // CSV of each face's brightness per frame
+    std::string dumpLaser;       // CSV of each face's laser search per frame
     std::string dumpLabels;      // CSV of each recognition result
     std::string saveFrames;      // directory for annotated snapshots
     int saveEvery = 30;

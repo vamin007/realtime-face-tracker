@@ -242,11 +242,12 @@ std::vector<std::string> debugLines(const Track& t, bool predicted, const DrawOp
     if (options.targeting) {
         const auto it = options.targeting->faces().find(t.id);
         if (it != options.targeting->faces().end()) {
-            const FaceLight& f = it->second;
-            if (f.blocked) lines.push_back("light: not measured");
+            const FaceLaser& f = it->second;
+            if (!f.checked) lines.push_back("laser: not checked");
+            else if (!f.dot.found) lines.push_back("laser: none");
             else {
-                std::snprintf(buf, sizeof(buf), "light %.2fx room, %.2fx normal", f.ratio,
-                              f.rise());
+                std::snprintf(buf, sizeof(buf), "laser on face, +%.0f red, %d px", f.dot.redness,
+                              f.dot.area);
                 lines.push_back(buf);
             }
         }

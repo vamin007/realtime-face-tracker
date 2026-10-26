@@ -156,13 +156,14 @@ void dumpDetections(std::ofstream& out, long long frame, double tMs,
     }
 }
 
-void dumpLight(std::ofstream& out, long long frame, double tMs, const TargetSelector& targeting) {
+void dumpLaser(std::ofstream& out, long long frame, double tMs, const TargetSelector& targeting) {
     for (const auto& [id, f] : targeting.faces()) {
-        if (f.lastUpdate * 1000.0 < tMs - 1) continue;  // not measured this frame
+        if (!f.checked) continue;  // not looked at this frame
+        const LaserDot& d = f.dot;
         char line[160];
-        std::snprintf(line, sizeof(line), "%lld,%.1f,%d,%.1f,%.1f,%.3f,%.3f,%.3f,%d,%d\n", frame,
-                      tMs, id, f.faceLuma, targeting.background(), f.ratio, f.normalRatio, f.rise(),
-                      f.litSince >= 0 ? 1 : 0, targeting.target().trackId == id ? 1 : 0);
+        std::snprintf(line, sizeof(line), "%lld,%.1f,%d,%d,%.1f,%.1f,%d,%.1f,%.2f,%d\n", frame, tMs,
+                      id, d.found ? 1 : 0, d.center.x, d.center.y, d.area, d.redness, d.skinAround,
+                      targeting.target().trackId == id ? 1 : 0);
         out << line;
     }
 }
@@ -282,16 +283,16 @@ int main(int argc, char** argv) try {
         logger = std::make_unique<Logger>(opt.logDir);
         std::cout << "Logging to " << logger->path() << '\n';
     }
-    std::ofstream dump, lightDump;
+    std::ofstream dump, laserDump;
     if (!opt.dumpDetections.empty()) {
         dump.open(opt.dumpDetections);
         if (!dump) throw std::runtime_error("Failed to open " + opt.dumpDetections);
         dump << "frame,t_ms,class,conf,weak,x,y,w,h,keypoints\n";
     }
-    if (!opt.dumpLight.empty()) {
-        lightDump.open(opt.dumpLight);
-        if (!lightDump) throw std::runtime_error("Failed to open " + opt.dumpLight);
-        lightDump << "frame,t_ms,id,face_luma,background,ratio,normal,rise,lit,target\n";
+    if (!opt.dumpLaser.empty()) {
+        laserDump.open(opt.dumpLaser);
+        if (!laserDump) throw std::runtime_error("Failed to open " + opt.dumpLaser);
+        laserDump << "frame,t_ms,id,dot,x,y,area,redness,skin_around,target\n";
     }
     std::ofstream labelDump;
     if (!opt.dumpLabels.empty() && recognizer) {
@@ -373,7 +374,7 @@ int main(int argc, char** argv) try {
         // before anything is drawn on the frame.
         if (recognizer) recognizer->update(frame, tracker.tracks(), tMs / 1000.0);
         if (opt.targeting) targeting.update(frame, tracker.tracks(), tMs / 1000.0);
-        if (lightDump.is_open()) dumpLight(lightDump, frameIndex, tMs, targeting);
+        if (laserDump.is_open()) dumpLaser(laserDump, frameIndex, tMs, targeting);
         latency.add("labels+target", msSince(t2));
 
         const std::vector<Track>* shown = &tracker.tracks();

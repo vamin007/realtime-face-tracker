@@ -35,6 +35,20 @@ The user's call: "only focus on faces, hands, persons, and targets. Strip away a
 
 `--realtime` on `flashlight.mov`: 30.0 FPS with no skipped frames. Unit tests: 122. The only tracking difference from v2: on `hands_face` one person track ends 5 frames sooner, because weak "toothbrush" boxes no longer keep it alive.
 
+### Laser TARGET (2026-10-26, branch `laser-target`, from `v3`)
+The user's call: TARGET comes from a red laser dot on the face, not a bright light, and the dot must be on the face itself, not just inside its detection box. The bright-light TARGET is replaced.
+- **Where the face is:** an oval from YuNet's 5 landmarks (forehead to chin, cheek to cheek, tilted with the eyes). Hands in front of it are cut out by their shape from the 7 palm keypoints, not their box (boxes of hands beside the face hid the cheek in 77 of 90 frames of the first test).
+- **The dot:** pixels much redder than that face's median skin and bright, plus a white overexposed core; small, round, and the ring around it mostly that face's skin. On for 0.1 s to become the target, released 0.3 s after it leaves.
+- **Measured** (synthetic dots drawn onto `hands_face.mov` at the tracker's own landmarks, `scripts/make_laser_clip.py`; 90 frames per segment):
+
+| Dot on | Dot found | TARGET frames |
+|---|---|---|
+| cheek / forehead / nose / cheek | 80 / 83 / 83 / 79 | 81 / 86 / 86 / 86 (on within 0.13 s) |
+| wall in the box / above the hairline / beside the head / shirt | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
+
+On the real clips (no laser; `flashlight.mov` has a flashlight on the face): 0 dots found in 3602 face rows, 0 TARGET. Hand IDs unchanged (4 / 4); the laser search takes 0.3 ms per frame. Unit tests: 134.
+- **Not checked:** a real laser on a real camera (a real dot may be dimmer, larger, or more washed out than the synthetic one; `--dump-laser` on a recorded clip shows its redness and size for tuning `--laser-redness`).
+
 Still to do by the user, with the live camera (no clip covers these):
 - a live run: camera capture runs on a background thread now;
 - the UI polish overlay in a live window: the keys, pausing, the help panel, the pulsing TARGET corners;

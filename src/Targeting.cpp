@@ -1,62 +1,190 @@
 #include "Targeting.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <opencv2/geometry.hpp>  // convexHull
 #include <opencv2/imgproc.hpp>
 
 namespace {
 
-constexpr int kSmallWidth = 160;       // background brightness is measured on a 160x90 copy
-constexpr float kMeasuredPart = 0.6f;  // the middle of the face box: skin, not hair or background
+constexpr int kMinSkinPixels = 50;  // fewer face pixels than this: too small to judge
 
 cv::Rect frameRect(const cv::Mat& frame) { return {0, 0, frame.cols, frame.rows}; }
 
-cv::Rect2f middleOf(const cv::Rect2f& box, float keep) {
-    return {box.x + box.width * (1 - keep) / 2, box.y + box.height * (1 - keep) / 2,
-            box.width * keep, box.height * keep};
+float length(cv::Point2f v) { return std::sqrt(v.x * v.x + v.y * v.y); }
+
+// The median of values counted in a histogram.
+int medianOf(const int* counts, int bins, int total) {
+    for (int v = 0, seen = 0; v < bins; ++v) {
+        seen += counts[v];
+        if (seen * 2 >= total) return v;
+    }
+    return bins - 1;
 }
+
+// Red minus the larger of green and blue: high for a laser, moderate for skin
+// and lips, about zero for grey.
+int redness(const cv::Vec3b& p) { return int(p[2]) - std::max(int(p[1]), int(p[0])); }
 
 }  // namespace
 
-float meanLuma(const cv::Mat& frame, const cv::Rect2f& box, float keep) {
-    const cv::Rect inner = cv::Rect(middleOf(box, keep)) & frameRect(frame);
-    if (inner.area() <= 0) return 0;
-    cv::Mat gray;
-    cv::cvtColor(frame(inner), gray, cv::COLOR_BGR2GRAY);
-    return static_cast<float>(cv::mean(gray)[0]);
+cv::RotatedRect faceOval(const cv::Rect2f& box, const std::vector<cv::Point2f>& landmarks) {
+    if (landmarks.size() >= 5) {
+        cv::Point2f eyes = landmarks[1] - landmarks[0];
+        if (eyes.x < 0) eyes = -eyes;  // left to right in the image, mirrored or not
+        const cv::Point2f eyeMid = (landmarks[0] + landmarks[1]) * 0.5f;
+        const cv::Point2f mouthMid = (landmarks[3] + landmarks[4]) * 0.5f;
+        const float eyeDist = length(eyes);
+        const float eyesToMouth = length(mouthMid - eyeMid);
+        if (eyeDist >= 2 && eyesToMouth >= 2) {
+            const cv::Point2f up = (eyeMid - mouthMid) * (1 / eyesToMouth);
+            // Forehead: about one eyes-to-mouth distance above the eyes; chin:
+            // 0.8 of it below the mouth; cheeks: one eye distance out from the middle.
+            const cv::Point2f top = eyeMid + up * eyesToMouth;
+            const cv::Point2f bottom = mouthMid - up * (0.8f * eyesToMouth);
+            const float angle = std::atan2(eyes.y, eyes.x) * 180 / static_cast<float>(CV_PI);
+            return {(top + bottom) * 0.5f, cv::Size2f(2 * eyeDist, length(top - bottom)), angle};
+        }
+    }
+    return {cv::Point2f(box.x + box.width / 2, box.y + box.height / 2),
+            cv::Size2f(box.width * 0.75f, box.height * 0.9f), 0};
 }
 
-float backgroundLuma(const cv::Mat& frame, const std::vector<cv::Rect2f>& exclude) {
-    const float scale = static_cast<float>(kSmallWidth) / frame.cols;
-    cv::Mat small, gray;
-    cv::resize(frame, small, cv::Size(), scale, scale, cv::INTER_AREA);
-    cv::cvtColor(small, gray, cv::COLOR_BGR2GRAY);
-    cv::Mat mask(gray.size(), CV_8U, cv::Scalar(255));
-    for (const cv::Rect2f& b : exclude) {
-        const cv::Rect r =
-            cv::Rect(cv::Rect2f(b.x * scale, b.y * scale, b.width * scale, b.height * scale)) &
-            cv::Rect(0, 0, gray.cols, gray.rows);
-        if (r.area() > 0) mask(r).setTo(0);
+std::vector<cv::Point> handShape(const cv::Rect2f& box, const std::vector<cv::Point2f>& keypoints) {
+    std::vector<cv::Point> shape;
+    if (keypoints.size() >= 7) {
+        const cv::Point2f palm = keypoints[2] - keypoints[0];  // wrist -> middle finger base
+        if (length(palm) >= 2) {
+            constexpr float kFinger = 0.9f;  // finger length / palm length
+            constexpr float kGrow = 1.15f;   // finger width, motion blur
+            std::vector<cv::Point2f> points(keypoints.begin(), keypoints.begin() + 7);
+            for (int k = 1; k <= 4; ++k) points.push_back(keypoints[k] + palm * kFinger);
+            points.push_back(keypoints[6] + (keypoints[6] - keypoints[5]));  // thumb tip
+            std::vector<cv::Point2f> hull;
+            cv::convexHull(points, hull);
+            cv::Point2f c(0, 0);
+            for (const cv::Point2f& p : hull) c += p;
+            c *= 1.0f / static_cast<float>(hull.size());
+            for (const cv::Point2f& p : hull) shape.emplace_back(c + (p - c) * kGrow);
+            return shape;
+        }
     }
-    // Median of the unmasked pixels from their histogram: a small, very bright
-    // spot (the flashlight itself, a lamp) barely moves it.
-    int counts[256] = {0};
+    const cv::Rect r(box);
+    return {r.tl(), {r.x + r.width, r.y}, r.br(), {r.x, r.y + r.height}};
+}
+
+LaserDot findLaserDot(const cv::Mat& frame, const cv::RotatedRect& oval,
+                      const std::vector<std::vector<cv::Point>>& hidden,
+                      const TargetParams& params) {
+    const cv::Rect roi = oval.boundingRect() & frameRect(frame);
+    if (roi.area() <= 0) return {};
+    const cv::Mat img = frame(roi);
+
+    // The face: inside the oval and not behind a hand.
+    cv::Mat face(roi.size(), CV_8U, cv::Scalar(0));
+    cv::RotatedRect local = oval;
+    local.center -= cv::Point2f(static_cast<float>(roi.x), static_cast<float>(roi.y));
+    cv::ellipse(face, local, cv::Scalar(255), cv::FILLED);
+    for (const std::vector<cv::Point>& h : hidden) {
+        std::vector<cv::Point> local;
+        for (const cv::Point& p : h) local.push_back(p - roi.tl());
+        cv::fillConvexPoly(face, local, cv::Scalar(0));
+    }
+
+    // The skin's typical color: the median of each channel and of redness. A dot
+    // is a handful of pixels, so it barely moves a median.
+    std::array<std::array<int, 256>, 3> channel{};
+    std::array<int, 511> red{};  // redness + 255
     int total = 0;
-    for (int y = 0; y < gray.rows; ++y) {
-        const uchar* g = gray.ptr<uchar>(y);
-        const uchar* m = mask.ptr<uchar>(y);
-        for (int x = 0; x < gray.cols; ++x)
-            if (m[x]) {
-                ++counts[g[x]];
-                ++total;
+    for (int y = 0; y < img.rows; ++y) {
+        const cv::Vec3b* p = img.ptr<cv::Vec3b>(y);
+        const uchar* m = face.ptr<uchar>(y);
+        for (int x = 0; x < img.cols; ++x) {
+            if (!m[x]) continue;
+            for (int c = 0; c < 3; ++c) ++channel[c][p[x][c]];
+            ++red[redness(p[x]) + 255];
+            ++total;
+        }
+    }
+    if (total < kMinSkinPixels) return {};
+    const cv::Vec3i skin(medianOf(channel[0].data(), 256, total),
+                         medianOf(channel[1].data(), 256, total),
+                         medianOf(channel[2].data(), 256, total));
+    const int skinRedness = medianOf(red.data(), 511, total) - 255;
+
+    // Dot pixels: far redder than the skin and bright, plus an overexposed white
+    // core where it touches them.
+    const float minRedness = skinRedness + params.minRednessAbove;
+    cv::Mat redMask(roi.size(), CV_8U, cv::Scalar(0)), coreMask(roi.size(), CV_8U, cv::Scalar(0));
+    for (int y = 0; y < img.rows; ++y) {
+        const cv::Vec3b* p = img.ptr<cv::Vec3b>(y);
+        const uchar* m = face.ptr<uchar>(y);
+        uchar* r = redMask.ptr<uchar>(y);
+        uchar* c = coreMask.ptr<uchar>(y);
+        for (int x = 0; x < img.cols; ++x) {
+            if (!m[x]) continue;
+            if (p[x][2] >= params.minRed && redness(p[x]) >= minRedness) r[x] = 255;
+            else if (std::min({p[x][0], p[x][1], p[x][2]}) >= params.coreLevel) c[x] = 255;
+        }
+    }
+    if (cv::countNonZero(redMask) == 0) return {};
+    cv::Mat nearRed;
+    cv::dilate(redMask, nearRed, cv::getStructuringElement(cv::MORPH_ELLIPSE, {5, 5}));
+    cv::Mat dotMask = redMask | (coreMask & nearRed);
+
+    cv::Mat labels, stats, centroids;
+    const int n = cv::connectedComponentsWithStats(dotMask, labels, stats, centroids, 8, CV_32S);
+    const float maxArea = params.maxAreaShare * static_cast<float>(total);
+    LaserDot best;
+    for (int i = 1; i < n; ++i) {
+        const int area = stats.at<int>(i, cv::CC_STAT_AREA);
+        const int w = stats.at<int>(i, cv::CC_STAT_WIDTH), h = stats.at<int>(i, cv::CC_STAT_HEIGHT);
+        if (area < params.minArea || area > maxArea) continue;
+        if (static_cast<float>(area) / (w * h) < params.minFill) continue;
+        if (static_cast<float>(std::max(w, h)) / std::min(w, h) > params.maxElongation) continue;
+
+        // Its red pixels' redness (the white core has none to speak of).
+        const cv::Rect bb(stats.at<int>(i, cv::CC_STAT_LEFT), stats.at<int>(i, cv::CC_STAT_TOP), w, h);
+        double rednessSum = 0;
+        int redCount = 0;
+        for (int y = bb.y; y < bb.y + bb.height; ++y)
+            for (int x = bb.x; x < bb.x + bb.width; ++x)
+                if (labels.at<int>(y, x) == i && redMask.at<uchar>(y, x)) {
+                    rednessSum += redness(img.at<cv::Vec3b>(y, x));
+                    ++redCount;
+                }
+        if (redCount < 2) continue;
+
+        // On the face itself: the ring around the dot (past its glow) must be
+        // mostly this face's skin, inside the oval and not behind a hand.
+        const cv::Point2f c(static_cast<float>(centroids.at<double>(i, 0)),
+                            static_cast<float>(centroids.at<double>(i, 1)));
+        const float radius = std::max(w, h) / 2.0f;
+        const float inner = 2 * radius + 1, outer = std::max(4 * radius, inner + 4);
+        int ring = 0, skinRing = 0;
+        for (int y = static_cast<int>(c.y - outer); y <= static_cast<int>(c.y + outer); ++y)
+            for (int x = static_cast<int>(c.x - outer); x <= static_cast<int>(c.x + outer); ++x) {
+                const float d = length(cv::Point2f(x - c.x, y - c.y));
+                if (d < inner || d > outer) continue;
+                ++ring;
+                if (x < 0 || y < 0 || x >= img.cols || y >= img.rows || !face.at<uchar>(y, x))
+                    continue;
+                const cv::Vec3b p = img.at<cv::Vec3b>(y, x);
+                bool like = true;
+                for (int ch = 0; ch < 3; ++ch)
+                    like = like && std::abs(int(p[ch]) - skin[ch]) <= params.skinTolerance;
+                skinRing += like;
             }
+        const float skinAround = ring > 0 ? static_cast<float>(skinRing) / ring : 0;
+        if (skinAround < params.minSkinAround) continue;
+
+        const float r = static_cast<float>(rednessSum / redCount) - skinRedness;
+        if (!best.found || r > best.redness)
+            best = {true, c + cv::Point2f(static_cast<float>(roi.x), static_cast<float>(roi.y)),
+                    area, r, skinAround};
     }
-    if (total == 0) return static_cast<float>(cv::mean(gray)[0]);
-    for (int v = 0, seen = 0; v < 256; ++v) {
-        seen += counts[v];
-        if (seen * 2 >= total) return static_cast<float>(v);
-    }
-    return 255;
+    return best;
 }
 
 TargetSelector::TargetSelector(const ClassRegistry& classes, TargetParams params)
@@ -66,64 +194,38 @@ bool TargetSelector::isFace(const Track& t) const {
     return classes_.kind(classes_.base(t.classId)) == ClassKind::Face;
 }
 
+// The dot was actually seen over at least enterTime (not just first seen that
+// long ago) and is still there.
+bool TargetSelector::dotOn(const FaceLaser& f, double now) const {
+    constexpr double kSlack = 1e-6;  // frame times are sums of floating-point steps
+    return f.onSince >= 0 && f.lastDot - f.onSince >= params_.enterTime - kSlack &&
+           now - f.lastDot <= params_.dropTime;
+}
+
 const Target& TargetSelector::update(const cv::Mat& frame, const std::vector<Track>& tracks,
                                      double now) {
-    std::vector<cv::Rect2f> faceBoxes, handBoxes;
-    for (const Track& t : tracks) {
-        if (!t.visible) continue;
-        if (isFace(t)) faceBoxes.push_back(t.box);
-        // Only a hand detected confidently just now counts as being in front of a
-        // face: the palm model sometimes weakly mistakes a face for a palm.
-        if (classes_.kind(classes_.base(t.classId)) == ClassKind::Hand &&
+    // Only a hand detected confidently just now hides the face behind it: the
+    // palm model sometimes weakly mistakes a face for a palm.
+    std::vector<std::vector<cv::Point>> hands;
+    for (const Track& t : tracks)
+        if (t.visible && classes_.kind(classes_.base(t.classId)) == ClassKind::Hand &&
             now - t.lastStrong <= params_.handRecent)
-            handBoxes.push_back(t.box);
-    }
-    background_ = std::max(backgroundLuma(frame, faceBoxes), 1.0f);
+            hands.push_back(handShape(t.box, t.keypoints));
 
-    // 1. Measure every visible face and update its normal ratio.
+    // 1. Look for the laser on every face detected in this frame (its landmarks
+    //    are fresh then; a predicted box may have drifted off the face).
     for (const Track& t : tracks) {
         if (!t.visible || !isFace(t)) continue;
-        auto [it, isNew] = faces_.try_emplace(t.id);
-        FaceLight& f = it->second;
-        if (isNew) f.firstSeen = now;
-        const double dt = isNew ? 0 : now - f.lastUpdate;
-        f.lastUpdate = now;
-
-        // Measure only a face detected in this frame with no hand in front of
-        // it: a palm held up to the face is brighter than the face behind it.
-        const cv::Rect2f measured = middleOf(t.box, kMeasuredPart);
-        float handCover = 0;
-        for (const cv::Rect2f& h : handBoxes)
-            handCover = std::max(handCover, (h & measured).area() / measured.area());
-        f.blocked = !t.matched || handCover > params_.maxHandCover;
-        if (f.blocked) {
-            f.litSince = -1;
-            continue;
-        }
-        f.measuredAt = now;
-        f.faceLuma = meanLuma(frame, t.box, kMeasuredPart);
-        f.ratio = f.faceLuma / background_;
-
-        const bool learning = now - f.firstSeen < params_.learnTime;
-        const bool lit =
-            !learning && f.ratio >= params_.minRatio && f.ratio >= params_.minRise * f.normalRatio;
-        if (lit) {
-            if (f.litSince < 0) f.litSince = now;
-        } else {
-            f.litSince = -1;
-        }
-        // The normal ratio: learned fast in the first second, then it follows the
-        // face quickly while it's near normal and slowly otherwise. It's frozen
-        // while the face is lit or targeted.
-        if (f.normalRatio <= 0) {
-            f.normalRatio = f.ratio;
-        } else if (!lit && t.id != target_.trackId) {
-            const bool nearNormal = std::abs(f.rise() - 1) <= params_.normalBand;
-            const double tau = learning     ? params_.learnTime / 4
-                               : nearNormal ? params_.normalTimeConstant
-                                            : params_.driftTimeConstant;
-            const float a = static_cast<float>(1 - std::exp(-dt / tau));
-            f.normalRatio += a * (f.ratio - f.normalRatio);
+        FaceLaser& f = faces_[t.id];
+        f.checked = t.matched;
+        f.dot = {};
+        if (!t.matched) continue;
+        f.dot = findLaserDot(frame, faceOval(t.box, t.keypoints), hands, params_);
+        if (f.dot.found) {
+            if (f.onSince < 0 || now - f.lastDot > params_.dropTime) f.onSince = now;
+            f.lastDot = now;
+        } else if (f.onSince >= 0 && now - f.lastDot > params_.dropTime) {
+            f.onSince = -1;
         }
     }
     // Forget faces whose tracks are gone.
@@ -133,45 +235,37 @@ const Target& TargetSelector::update(const cv::Mat& frame, const std::vector<Tra
         it = alive ? std::next(it) : faces_.erase(it);
     }
 
-    // 2. Keep or release the current target.
+    // 2. Keep the current target while the dot was seen on it recently.
     const Track* current = nullptr;
     for (const Track& t : tracks)
         if (t.id == target_.trackId) current = &t;
     if (current) {
-        const FaceLight& f = faces_[current->id];
-        if (f.measuredAt == now) {
-            targetSeen_ = now;
-            if (f.rise() < params_.releaseRise) {
-                if (releaseSince_ < 0) releaseSince_ = now;
-            } else {
-                releaseSince_ = -1;
-            }
-        }
-        const bool released = releaseSince_ >= 0 && now - releaseSince_ >= params_.releaseTime;
+        const FaceLaser& f = faces_[current->id];
+        if (f.checked) targetSeen_ = now;
+        const bool released = now - f.lastDot > params_.releaseTime;
         const bool lostTooLong = now - targetSeen_ > params_.coastTime;
         if (released || lostTooLong) current = nullptr;
     }
 
-    // 3. The brightest face that has been lit long enough can become (or take
-    //    over as) the target.
+    // 3. A face the dot has stayed on becomes the target; it takes over from the
+    //    current one once the dot has left that.
     const Track* best = nullptr;
     for (const Track& t : tracks) {
-        if (!t.visible || !isFace(t)) continue;
-        const FaceLight& f = faces_[t.id];
-        if (f.litSince < 0 || now - f.litSince < params_.enterTime) continue;
-        if (!best || f.ratio > faces_[best->id].ratio) best = &t;
+        if (!t.visible || !isFace(t) || !dotOn(faces_[t.id], now)) continue;
+        if (!best || faces_[t.id].dot.redness > faces_[best->id].dot.redness) best = &t;
     }
-    if (best && best != current &&
-        (!current || faces_[best->id].ratio > faces_[current->id].ratio + params_.switchMargin)) {
+    if (best && best != current && (!current || !dotOn(faces_[current->id], now))) {
         current = best;
         targetSeen_ = now;
-        releaseSince_ = -1;
     }
 
+    const Target previous = target_;
     target_ = Target{};
     if (current) {
-        const FaceLight& f = faces_[current->id];
-        target_ = {current->id, current->box, f.ratio, f.rise()};
+        const FaceLaser& f = faces_[current->id];
+        const bool same = previous.trackId == current->id;
+        target_ = {current->id, current->box,
+                   f.dot.found ? f.dot.center : same ? previous.dot : cv::Point2f()};
     }
     return target_;
 }

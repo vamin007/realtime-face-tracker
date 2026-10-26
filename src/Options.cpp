@@ -78,10 +78,9 @@ void printUsage() {
            "  --no-faces            turn off face detection\n"
            "  --no-hands            turn off hand detection\n"
            "  --backend B           coreml (GPU / Neural Engine, default) or cpu\n"
-           "\nTARGET (a face a bright light shines on):\n"
+           "\nTARGET (a face a red laser dot is on):\n"
            "  --no-targeting        turn it off\n"
-           "  --target-ratio N      a lit face is N times as bright as the room (default 1.0)\n"
-           "  --target-rise N       ... and N times brighter than it normally is (default 1.35)\n"
+           "  --laser-redness N     how much redder than the skin a dot must be, 0..255 (default 60)\n"
            "\nCustom labels (a specific person, recognized by their face, taught from photos):\n"
            "  Each label is a folder of photos, labels/NAME/; new and changed photos are\n"
            "  looked at when the tracker starts.\n"
@@ -103,7 +102,7 @@ void printUsage() {
            "\nDeveloper options:\n"
            "  --max-frames N            stop after N frames\n"
            "  --dump-detections PATH    write every raw detection to a CSV\n"
-           "  --dump-light PATH         write each face's brightness per frame to a CSV\n"
+           "  --dump-laser PATH         write each face's laser search result per frame to a CSV\n"
            "  --dump-labels PATH        write each recognition result (label scores) to a CSV\n"
            "  --save-frames DIR         save annotated frames as JPEGs\n"
            "  --save-every N            with --save-frames: every Nth frame (default 30)\n"
@@ -143,8 +142,8 @@ bool parseArgs(const std::vector<std::string>& args, Options& opt) {
             else if (b == "cpu") opt.backend = Backend::Cpu;
             else throw std::runtime_error("--backend expects coreml or cpu, got '" + b + "'");
         } else if (arg == "--no-targeting") opt.targeting = false;
-        else if (arg == "--target-ratio") opt.target.minRatio = parseFloat(arg, next(), 0.5f, 100);
-        else if (arg == "--target-rise") opt.target.minRise = parseFloat(arg, next(), 1, 100);
+        else if (arg == "--laser-redness")
+            opt.target.minRednessAbove = parseFloat(arg, next(), 0, 255);
         else if (arg == "--enroll") opt.enrollName = next();
         else if (arg == "--add-photos") {
             opt.enrollName = next();
@@ -162,7 +161,7 @@ bool parseArgs(const std::vector<std::string>& args, Options& opt) {
         else if (arg == "--hand-model") opt.handModel = {next(), true};
         else if (arg == "--max-frames") opt.maxFrames = parseInt(arg, next(), 1, 100000000);
         else if (arg == "--dump-detections") opt.dumpDetections = next();
-        else if (arg == "--dump-light") opt.dumpLight = next();
+        else if (arg == "--dump-laser") opt.dumpLaser = next();
         else if (arg == "--dump-labels") opt.dumpLabels = next();
         else if (arg == "--save-frames") opt.saveFrames = next();
         else if (arg == "--save-every")

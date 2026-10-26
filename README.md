@@ -1,7 +1,7 @@
 # Object Tracker
 
 Tracks people, faces and hands through the MacBook camera (or a video file) and draws a live overlay with
-an ID per track, and a red `TARGET` box on a face lit by a bright light. Each run also writes a CSV log of
+an ID per track, and a red `TARGET` box on a face a red laser dot is on. Each run also writes a CSV log of
 every visible track.
 
 - **Detection:** YOLOv8n for people (the model has COCO's 80 classes; only person's scores are read),
@@ -13,10 +13,15 @@ every visible track.
   numbered on its own (`hand #1`, `hand #2`, `face #1`), and numbers are never reused within a run.
   The filter smooths detection jitter, but a box snaps to its detection when the object moves faster than
   the filter expects (a waved hand), so it doesn't trail behind.
-- **TARGET:** when a bright light suddenly shines on a face, that face gets a red box labeled `TARGET`.
-  Brightness is judged relative to the room and to the face's own normal level, so a face that is always
-  bright, a room light switching on, a bright phone or a hand held up to the face don't count. Only faces
-  can be targets, and only the brightest lit one at a time (`--no-targeting` turns it off).
+- **TARGET:** when a red laser dot is on a face, that face gets a red box labeled `TARGET` (within about
+  0.1 s; released 0.3 s after the dot leaves). The dot must be on the face itself, not just inside its box:
+  the face's outline is an oval built from its landmarks (forehead to chin, cheek to cheek), and the pixels
+  around the dot must be that face's skin. A dot on the hair, an ear, the wall behind the head, or a hand
+  in front of the face (its outline from the palm keypoints, not its whole box) doesn't count. A dot is
+  judged against the face's own skin color: much redder and brighter, small and round, often white in
+  the middle. Flashlights, lamps, red lips and red clothes don't count. Only faces can be targets, one at a
+  time; the target follows the dot to another face (`--no-targeting` turns it off; `--laser-redness N`,
+  default 60, sets how much redder than the skin a dot must be).
 
 `v3` is this people-only version. `v2` has every feature (all 80 COCO classes, object labels), and was
 built following [PLAN.md](PLAN.md); `main` holds the original version.
@@ -79,12 +84,12 @@ Teach it a specific person's face from a few photos, so their face shows their n
 - Photos without a face aren't used. A sync also points out photos that don't look like the rest, labels with fewer than 5 usable photos, and labels so alike that recognition may mix them up.
 - A sync needs only the face detector. If it didn't load, startup leaves the labels as they were and says so, and `--sync-labels`, `--enroll` and `--add-photos` stop with an error. With `--no-faces`, startup leaves new photos for `--sync-labels`.
 - While tracking, faces are checked in the background a few times a second. A face takes the label after 3 matching checks, and each label is one person, so at most one face has it. Label changes are picked up at the next start.
-- A face under a bright light still shows `TARGET`.
+- A face with the laser on it still shows `TARGET`.
 - **Labels from `v2`:** face labels work as they are. Object labels (e.g. a phone) are reported as unsupported and left untouched, so they still work if you switch back to `v2`; `class:` and `whole_photo:` lines in `label.yml` are ignored. Labels made by an even earlier version (one `label.yml` with the embeddings) are converted automatically; the old file is kept as `.label-v1.yml`.
 - `labels/` holds your photos and isn't committed to git.
 
 ## Logs
-Each run writes `logs/run_<date>_<time>.csv`: one row per visible track per frame. The columns are `time_ms`, `frame`, `id` (unique for the run), `number` (the one on screen), `class`, `label`, `matched` (0 = not detected this frame), the box, `conf`, `target`, `light_ratio` (faces) and `coasting` (1 = drawn with corners only, as a prediction). To summarize one or more runs:
+Each run writes `logs/run_<date>_<time>.csv`: one row per visible track per frame. The columns are `time_ms`, `frame`, `id` (unique for the run), `number` (the one on screen), `class`, `label`, `matched` (0 = not detected this frame), the box, `conf`, `target`, `laser` (faces: how much redder than the skin the laser dot on it is; empty if none) and `coasting` (1 = drawn with corners only, as a prediction). To summarize one or more runs:
 ```sh
 scripts/log_stats.py logs/run_*.csv
 ```
@@ -99,6 +104,22 @@ To tune the tracker without re-running the neural networks, save a clip's detect
 ```
 Besides IDs it reports flicker and lag per class: how far the shown box is from its detection, overall and while the object moves fast, and how far behind it trails.
 
+## Testing the laser
+**Laser pointers can damage eyes in a fraction of a second.** Aim at the cheek or forehead, never near
+the eyes, or use a printed face photo or a mannequin head.
+
+To check it without a laser, draw synthetic dots onto a clip at places taken from the tracker's own face
+landmarks (cheek, forehead, nose: should be TARGET; the wall in the face's box, above the hairline, beside
+the head, the shirt: shouldn't), then run the tracker on the result:
+```sh
+./build/tracker --video clips/hands_face.mov --no-window --no-log --dump-detections /tmp/dets.csv
+.venv/bin/python scripts/make_laser_clip.py clips/hands_face.mov /tmp/dets.csv /tmp/laser.mp4 /tmp/schedule.csv
+./build/tracker --video /tmp/laser.mp4 --no-window --dump-laser /tmp/laser_dump.csv
+```
+`--dump-laser` writes, per face and frame, whether a dot was found, where, its size, its redness and how
+much of the ring around it is skin. To tune on a real laser, record a clip (`--record clips/laser.mov`)
+and look at that file for it.
+
 ## Layout
 ```
 src/        Camera (capture thread); ClassRegistry (person, hand, face, labels); Detector runs the
@@ -110,7 +131,7 @@ labels/     face labels: a folder of photos per person, with optional label.yml 
 tools/      replay.cpp: the tracker on saved detections (tracker_replay); grab_frames.cpp:
             a video's frames, or face crops, saved as photos (grab_frames)
 tests/      GoogleTest unit tests (tracker_tests)
-scripts/    fetch_models.sh, export_yolo.sh, log_stats.py
+scripts/    fetch_models.sh, export_yolo.sh, log_stats.py, make_laser_clip.py
 models/     *.onnx (downloaded, not in git)
 clips/      reference videos for regression runs (not in git)
 logs/       run logs (not in git)

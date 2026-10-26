@@ -88,12 +88,13 @@ TEST_F(OverlayTest, OnlyTheTargetIsRed) {
     EXPECT_GT(cv::norm(frame, empty, cv::NORM_L1), 0);
     EXPECT_EQ(redPixels(frame), 0);
 
-    // A light comes on the face: it becomes the target and is drawn red.
+    // A laser dot lands on the face: it becomes the target and is drawn red.
     const cv::Rect2f face(540, 200, 200, 260);
     TargetSelector targeting(classes);
     std::vector<Track> tracks = {makeTrack(2, 1, classes.face(), face)};
+    tracks[0].keypoints = {{600, 290}, {680, 290}, {640, 330}, {610, 380}, {670, 380}};
     cv::Mat scene(720, 1280, CV_8UC3, cv::Scalar::all(150));
-    scene(cv::Rect(face)).setTo(cv::Scalar::all(110));
+    cv::ellipse(scene, {640, 330}, {92, 135}, 0, 0, 360, cv::Scalar(120, 150, 200), cv::FILLED);
     double now = 0;
     auto run = [&](int frames) {
         for (int i = 0; i < frames; ++i, now += 1.0 / 30) {
@@ -102,8 +103,7 @@ TEST_F(OverlayTest, OnlyTheTargetIsRed) {
         }
     };
     run(60);
-    scene.setTo(cv::Scalar::all(110));
-    scene(cv::Rect(face)).setTo(cv::Scalar::all(190));
+    cv::circle(scene, {685, 345}, 4, cv::Scalar(40, 40, 235), cv::FILLED);
     run(6);
     ASSERT_TRUE(targeting.target().active());
     options.targeting = &targeting;
