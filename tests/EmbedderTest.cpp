@@ -31,7 +31,7 @@ TEST(Embedder, MirroringSwapsFaceSides) {
     cv::Rect2f box(100, 50, 40, 60);
     // right eye, left eye, nose, right mouth corner, left mouth corner
     std::vector<cv::Point2f> kp = {{110, 60}, {130, 60}, {120, 75}, {112, 95}, {128, 95}};
-    mirrorDetection(200, box, kp, true);
+    mirrorDetection(200, box, kp);
     EXPECT_FLOAT_EQ(box.x, 60);    // 200 - 100 - 40
     EXPECT_FLOAT_EQ(kp[0].x, 70);  // the old left eye (130), mirrored
     EXPECT_FLOAT_EQ(kp[1].x, 90);  // the old right eye (110), mirrored
@@ -39,17 +39,20 @@ TEST(Embedder, MirroringSwapsFaceSides) {
     EXPECT_FLOAT_EQ(kp[3].x, 72);  // the old left mouth corner (128), mirrored
 }
 
-TEST(Embedder, ObjectEmbeddingsAreUnitLengthAndTellThingsApart) {
-    const std::string path = kModels + "dinov2_small.onnx";
+TEST(Embedder, FaceModelIsLoadedOnFirstUse) {
+    FaceEmbedder missing("/no/such/model.onnx");  // nothing loaded yet, so no error
+    EXPECT_EQ(missing.modelId(), "sface-2021dec");
+    EXPECT_THROW(missing.load(), std::runtime_error);
+
+    const std::string path = kModels + "face_recognition_sface_2021dec.onnx";
     if (!std::filesystem::exists(path)) GTEST_SKIP() << "missing " << path;
-    ObjectEmbedder embedder(path, Backend::Cpu, PROJECT_DIR "/.cache/coreml");
+    FaceEmbedder embedder(path);
     const cv::Mat frame = testFrame();
+    // Without landmarks the crop is used as it is (no face to straighten).
     const Embedding a = embedder.embed(frame, {100, 100, 160, 220}, {});
-    const Embedding a2 = embedder.embed(frame, {104, 96, 158, 224}, {});  // nearly the same box
     const Embedding b = embedder.embed(frame, {400, 150, 150, 150}, {});
-    ASSERT_EQ(a.size(), 384u);
+    ASSERT_EQ(a.size(), 128u);
     EXPECT_NEAR(similarity(a, a), 1, 1e-4);
-    EXPECT_GT(similarity(a, a2), 0.9f);
-    EXPECT_LT(similarity(a, b), similarity(a, a2));
-    EXPECT_TRUE(embedder.embed(frame, {10, 10, 3, 3}, {}).empty()) << "too small to embed";
+    EXPECT_LT(similarity(a, b), 0.99f);
+    EXPECT_TRUE(embedder.embed(frame, {700, 10, 30, 30}, {}).empty()) << "outside the frame";
 }

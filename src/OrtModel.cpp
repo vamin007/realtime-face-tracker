@@ -77,8 +77,7 @@ struct OrtModel::Impl {
     std::vector<int64_t> inputShape;
 };
 
-OrtModel::OrtModel(const std::string& path, Backend backend, const std::string& cacheDir,
-                   const std::map<std::string, int64_t>& freeDims)
+OrtModel::OrtModel(const std::string& path, Backend backend, const std::string& cacheDir)
     : impl_(std::make_unique<Impl>()) {
     if (!std::filesystem::exists(path))
         throw std::runtime_error("Model file not found: " + path +
@@ -88,8 +87,6 @@ OrtModel::OrtModel(const std::string& path, Backend backend, const std::string& 
         Ort::SessionOptions options;
         options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         options.SetIntraOpNumThreads(2);  // detectors run side by side; leave cores for each other
-        for (const auto& [name, value] : freeDims)
-            options.AddFreeDimensionOverrideByName(name.c_str(), value);
         return options;
     };
 

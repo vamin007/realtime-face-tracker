@@ -2,7 +2,6 @@
 #include <condition_variable>
 #include <deque>
 #include <map>
-#include <memory>
 #include <mutex>
 #include <opencv2/core.hpp>
 #include <string>
@@ -13,26 +12,6 @@
 #include "Embedder.h"
 #include "Labels.h"
 #include "Tracker.h"
-
-// The two embedding models, loaded on first use (DINOv2 isn't needed unless an
-// object label exists). Virtual so tests can stand in simpler ones.
-class Embedders {
-public:
-    Embedders(std::string faceModel, std::string objectModel, Backend backend,
-              std::string cacheDir);
-    virtual ~Embedders() = default;
-    virtual IEmbedder& forKind(ClassKind kind);  // faces: SFace; anything else: DINOv2
-    std::string info(ClassKind kind);
-    // The model's id and default threshold, without loading it.
-    virtual std::string modelId(ClassKind kind) const;
-    virtual float defaultThreshold(ClassKind kind) const;
-
-private:
-    std::string faceModel_, objectModel_, cacheDir_;
-    Backend backend_;
-    std::unique_ptr<FaceEmbedder> face_;
-    std::unique_ptr<ObjectEmbedder> object_;
-};
 
 struct RecognizerParams {
     double recheckInterval = 0.25;  // s between embeddings of a track without a label
@@ -58,14 +37,15 @@ struct TrackIdentity {
     float closestScore = 0;  // ... and its score
 };
 
-// Gives tracks custom labels. Each frame it sends a few crops of tracks whose
-// class has labels (e.g. cups, when "my_mug" exists) to a background thread
-// for embedding, then compares the results with the labels' samples. A track
-// gets a label after several consistent matches and keeps it until it stops
-// matching; each label (a specific item) belongs to at most one track.
+// Gives face tracks custom labels (specific people). Each frame it sends a few
+// face crops to a background thread for embedding, then compares the results
+// with the labels' samples. A track gets a label after several consistent
+// matches and keeps it until it stops matching; each label (a specific person)
+// belongs to at most one track.
 class Recognizer {
 public:
-    Recognizer(const LabelLibrary& library, const ClassRegistry& classes, Embedders& embedders,
+    // Loads the embedding model now, so loading errors show up at startup.
+    Recognizer(const LabelLibrary& library, const ClassRegistry& classes, IEmbedder& embedder,
                RecognizerParams params = {});
     ~Recognizer();
     Recognizer(const Recognizer&) = delete;
@@ -84,28 +64,24 @@ public:
 private:
     struct Job {
         int trackId;
-        ClassKind kind;
         cv::Mat crop;  // a copy: the frame gets drawn on while the worker runs
         cv::Rect2f box;
         std::vector<cv::Point2f> keypoints;
     };
     struct Result {
         int trackId;
-        ClassKind kind;
         Embedding embedding;
     };
 
     void work();
-    void apply(const Result& result, const std::string& baseClass);
-    std::string baseClassOf(const Track& t) const;
+    void apply(const Result& result);
 
     const LabelLibrary& library_;
     const ClassRegistry& classes_;
-    Embedders& embedders_;
+    IEmbedder& embedder_;
     RecognizerParams params_;
-    std::map<ClassKind, float> thresholds_;
+    float threshold_;  // the model's default; a label's own threshold overrides it
     std::map<int, TrackIdentity> identities_;
-    std::map<int, std::string> baseClasses_;  // track id -> its base class name
     std::ostream* debug_ = nullptr;
     double now_ = 0;
 

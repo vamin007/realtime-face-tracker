@@ -12,6 +12,8 @@
 #include <opencv2/imgproc.hpp>
 #include <stdexcept>
 
+#include "Recognizer.h"  // RecognizerParams
+
 namespace fs = std::filesystem;
 
 namespace {
@@ -23,12 +25,7 @@ constexpr float kOutlierGap = 0.15f;  // a photo agreeing this much less than th
 struct Change {
     std::string what;                // "new label", "updated", ...
     std::vector<std::string> lines;  // one per photo looked at or removed
-    bool choseClass = false;         // the class was chosen from the photos just now
 };
-
-ClassKind embedKind(ClassId base, const ClassRegistry& classes) {
-    return classes.kind(base) == ClassKind::Face ? ClassKind::Face : ClassKind::Object;
-}
 
 std::string number(float x) {
     char text[16];
@@ -50,30 +47,6 @@ const Detection* mostProminent(const std::vector<Detection>& detections, cv::Siz
             (!best || prominence(d, image) > prominence(*best, image)))
             best = &d;
     return best;
-}
-
-// Which kind of thing the photos show: the class that stands out most across
-// them. A person is recognized by their face (the face model is made for
-// telling people apart), so the face is preferred when the photos show one.
-// Unreadable photos have an empty size. -1 if nothing was found.
-ClassId chooseClass(const std::vector<std::vector<Detection>>& detections,
-                    const std::vector<cv::Size>& sizes, const ClassRegistry& classes) {
-    std::map<ClassId, float> weight;
-    int photos = 0, withFace = 0;
-    for (size_t i = 0; i < detections.size(); ++i) {
-        if (sizes[i].area() == 0) continue;
-        ++photos;
-        if (const Detection* best = mostProminent(detections[i], sizes[i]))
-            weight[best->classId] += prominence(*best, sizes[i]);
-        withFace += std::any_of(detections[i].begin(), detections[i].end(),
-                                [&](const Detection& d) { return d.classId == classes.face(); });
-    }
-    if (weight.empty()) return -1;
-    ClassId base = std::max_element(weight.begin(), weight.end(), [](const auto& a, const auto& b) {
-                       return a.second < b.second;
-                   })->first;
-    if (base == classes.person() && withFace * 2 >= photos) base = classes.face();
-    return base;
 }
 
 std::string extensionOf(const std::string& name) {
@@ -110,56 +83,48 @@ std::string retryNote(const std::string& error) {
     return "looking at it failed (" + error + "); the next sync tries it again";
 }
 
-bool itemMissing(const PhotoRecord& r) { return !r.used && r.note.rfind("no ", 0) == 0; }
+bool faceMissing(const PhotoRecord& r) { return !r.used && r.note.rfind("no ", 0) == 0; }
 
-// Looks at one photo: finds the item (or takes the whole photo) and embeds it,
-// and the photo mirrored left-right, since the live camera view is mirrored.
+// Looks at one photo: finds the face and embeds it, and the photo mirrored
+// left-right, since the live camera view is mirrored.
 PhotoRecord examine(const PhotoFile& file, const cv::Mat& image,
-                    const std::vector<Detection>& detections, ClassId base, bool wholePhoto,
-                    const ClassRegistry& classes, IEmbedder& embedder) {
+                    const std::vector<Detection>& detections, const ClassRegistry& classes,
+                    IEmbedder& embedder) {
     PhotoRecord r;
     r.file = file;
     if (image.empty()) {
         r.note = unreadableNote(file.name);
         return r;
     }
-    const std::string& name = classes.name(base);
-    cv::Rect2f box(0, 0, static_cast<float>(image.cols), static_cast<float>(image.rows));
-    std::vector<cv::Point2f> keypoints;
-    if (wholePhoto) {
-        r.note = "the whole photo";
-        r.conf = 1;
-    } else {
-        const Detection* item = mostProminent(detections, image.size(), base);
-        if (!item) {
-            r.note = "no " + name + " found";
-            return r;
-        }
-        box = item->box;
-        keypoints = item->keypoints;
-        r.conf = item->conf;
-        r.note = name + " found, confidence " + number(item->conf);
+    const Detection* face = mostProminent(detections, image.size(), classes.face());
+    if (!face) {
+        r.note = "no face found";
+        return r;
     }
+    cv::Rect2f box = face->box;
+    std::vector<cv::Point2f> keypoints = face->keypoints;
+    r.conf = face->conf;
+    r.note = "face found, confidence " + number(face->conf);
     r.roi = cv::Rect(box);
     r.embedding = embedder.embed(image, box, keypoints);
     if (r.embedding.empty()) {
-        r.note = "the " + name + " is too small (" + std::to_string(r.roi.width) + "x" +
+        r.note = "the face is too small (" + std::to_string(r.roi.width) + "x" +
                  std::to_string(r.roi.height) + " px)";
         return r;
     }
     cv::Mat mirrored;
     cv::flip(image, mirrored, 1);
-    mirrorDetection(image.cols, box, keypoints, classes.kind(base) == ClassKind::Face);
+    mirrorDetection(image.cols, box, keypoints);
     r.mirrored = embedder.embed(mirrored, box, keypoints);
     r.used = true;
     return r;
 }
 
 // Brings one label folder up to date (its plan isn't empty). Writes its .embeddings.yml.
-Change syncFolder(const LabelFolder& f, ClassId base, const SyncPlan& plan, Detector& detector,
-                  const ClassRegistry& classes, Embedders& embedders) {
+Change syncFolder(const LabelFolder& f, const SyncPlan& plan, Detector& detector,
+                  const ClassRegistry& classes, IEmbedder& embedder) {
     Change change;
-    const bool isNew = f.cache.photos.empty() && f.cache.baseClass.empty();
+    const bool isNew = f.cache.photos.empty() && f.cache.model.empty();
     change.what = isNew ? "new label"
                   : plan.redoAll && !plan.reason.empty()
                       ? "every photo looked at again, as " + plan.reason
@@ -167,68 +132,27 @@ Change syncFolder(const LabelFolder& f, ClassId base, const SyncPlan& plan, Dete
     for (const std::string& name : plan.removed) change.lines.push_back(name + ": removed");
     const std::string cacheFile = (fs::path(f.path) / kCacheFile).string();
     auto pathOf = [&](const PhotoFile& p) { return (fs::path(f.path) / p.name).string(); };
-    const bool wholePhoto = f.settings.wholePhoto;
 
-    std::vector<std::vector<Detection>> detections(plan.look.size());
-    std::vector<bool> detected(plan.look.size(), false);
-    // Why looking at a photo failed, when it may not fail next time (see retryNote).
-    std::vector<std::string> failed(plan.look.size());
-    if (base < 0) {
-        // The class is chosen from the photos, so all of them are looked at first.
-        std::vector<cv::Size> sizes(plan.look.size());
-        for (size_t i = 0; i < plan.look.size(); ++i) {
-            try {
-                const cv::Mat image = readPhoto(pathOf(plan.look[i]));
-                if (image.empty()) continue;
-                detections[i] = detector.detect(image, {});
-                sizes[i] = image.size();
-                detected[i] = true;
-            } catch (const std::exception& e) {
-                failed[i] = e.what();
-            }
-        }
-        base = chooseClass(detections, sizes, classes);
-        change.choseClass = base >= 0;
-        if (base < 0) {
-            // Remembered too, so the same photos aren't looked at on every start.
-            LabelCache cache;
-            cache.autoClass = true;
-            cache.wholePhoto = wholePhoto;
-            for (size_t i = 0; i < plan.look.size(); ++i) {
-                PhotoRecord r;
-                r.file = plan.look[i];
-                r.note = !failed[i].empty()    ? retryNote(failed[i])
-                         : sizes[i].area() > 0 ? "nothing found"
-                                               : unreadableNote(r.file.name);
-                change.lines.push_back(r.file.name + ": not used, " + r.note);
-                if (failed[i].empty()) cache.photos.push_back(std::move(r));
-            }
-            writeCache(cacheFile, cache);
-            return change;
-        }
-    }
-
-    IEmbedder& embedder = embedders.forKind(embedKind(base, classes));
-    LabelCache cache{embedder.modelId(), classes.name(base), f.settings.baseClass.empty(),
-                     wholePhoto, plan.keep};
-    for (size_t i = 0; i < plan.look.size(); ++i) {
-        const PhotoFile& photo = plan.look[i];
+    // The class is written as an earlier version, which also reads this file,
+    // would: set in label.yml or not.
+    LabelCache cache{embedder.modelId(), kFaceClass, f.settings.oldClass.empty(), false, plan.keep};
+    for (const PhotoFile& photo : plan.look) {
         PhotoRecord r;
-        if (failed[i].empty()) {
-            try {
-                const cv::Mat image = readPhoto(pathOf(photo));
-                if (!image.empty() && !wholePhoto && !detected[i])
-                    detections[i] = detector.detect(image, {});
-                r = examine(photo, image, detections[i], base, wholePhoto, classes, embedder);
-            } catch (const std::exception& e) {
-                failed[i] = e.what();
-            }
+        std::string failed;  // why looking at it failed, when it may not fail next time
+        try {
+            const cv::Mat image = readPhoto(pathOf(photo));
+            // Only faces are looked for, so only the face detector is needed.
+            const std::vector<Detection> faces =
+                image.empty() ? std::vector<Detection>{} : detector.detect(image, {classes.face()});
+            r = examine(photo, image, faces, classes, embedder);
+        } catch (const std::exception& e) {
+            failed = e.what();
+            r.note = retryNote(failed);
         }
-        if (!failed[i].empty()) r.note = retryNote(failed[i]);
         const bool changed = std::count(plan.changed.begin(), plan.changed.end(), photo.name) > 0;
         change.lines.push_back(photo.name + (changed ? " (changed)" : "") + ": " +
                                (r.used ? "" : "not used, ") + r.note);
-        if (failed[i].empty()) cache.photos.push_back(std::move(r));
+        if (failed.empty()) cache.photos.push_back(std::move(r));
     }
     std::sort(cache.photos.begin(), cache.photos.end(),
               [](const PhotoRecord& a, const PhotoRecord& b) { return a.file.name < b.file.name; });
@@ -238,47 +162,42 @@ Change syncFolder(const LabelFolder& f, ClassId base, const SyncPlan& plan, Dete
 
 // What a label is like after a sync: usable photos, how well they agree, and tips.
 void printReport(const LabelFolder& f, const Change* change, const LabelLibrary& library,
-                 const ClassRegistry& classes, const Embedders& embedders) {
+                 const IEmbedder& embedder) {
     const std::string settingsFile = (fs::path(f.path) / kSettingsFile).string();
-    std::string about = f.cache.baseClass.empty() ? "class not chosen" : f.cache.baseClass;
-    if (!f.cache.baseClass.empty() && f.cache.autoClass) about += ", chosen from the photos";
-    if (f.cache.wholePhoto) about += ", whole photos";
-    std::printf("Label '%s' (%s): %s\n", f.name.c_str(), about.c_str(),
-                change ? change->what.c_str() : "unchanged");
+    std::printf("Label '%s': %s\n", f.name.c_str(), change ? change->what.c_str() : "unchanged");
     if (change)
         for (const std::string& line : change->lines) std::printf("  %s\n", line.c_str());
-    if (change && change->choseClass)
-        std::printf("  Not a %s? Say what it is in %s, e.g.  class: %s\n",
-                    f.cache.baseClass.c_str(), settingsFile.c_str(),
-                    f.cache.baseClass == "cup" ? "bottle" : "cup");
+    if (!f.settings.oldKeys.empty()) {
+        std::string keys;
+        for (size_t i = 0; i < f.settings.oldKeys.size(); ++i)
+            keys += (i == 0 ? "" : " and ") + f.settings.oldKeys[i];
+        std::printf(
+            "  Note: %s in %s %s from an earlier version and not used now (every label "
+            "is a face, found in each photo).\n",
+            keys.c_str(), settingsFile.c_str(), f.settings.oldKeys.size() == 1 ? "is" : "are");
+    }
 
     // The photos in the folder: one that couldn't be looked at this time isn't in the cache.
     const int total = static_cast<int>(f.photos.size());
     const int used = f.usedPhotos();
-    const bool missing = std::any_of(f.cache.photos.begin(), f.cache.photos.end(), itemMissing);
+    const bool missing = std::any_of(f.cache.photos.begin(), f.cache.photos.end(), faceMissing);
     const int index = library.find(f.name);
     if (total == 0) {
-        std::printf("  No photos yet: put 5-10 photos of the item in %s\n", f.path.c_str());
+        std::printf("  No photos yet: put 5-10 photos of the person's face in %s\n",
+                    f.path.c_str());
         return;
     }
-    if (f.cache.baseClass.empty() && !f.cache.photos.empty())
-        std::printf("  No object found in the photos. Say what it is in %s, e.g.  class: cup\n",
-                    settingsFile.c_str());
     if (index < 0) {
-        if (!f.cache.baseClass.empty())
-            std::printf("  None of its %d photo(s) is usable, so it can't be recognized.\n", total);
-        if (missing && !f.cache.wholePhoto)
+        std::printf("  None of its %d photo(s) is usable, so it can't be recognized.\n", total);
+        if (missing)
             std::printf(
-                "  If the photos are close-ups of the item, add  whole_photo: true  to %s\n",
-                settingsFile.c_str());
+                "  Each photo needs a clear view of the face, from the front or a little "
+                "to the side.\n");
         return;
     }
 
     const CustomLabel& label = library.labels()[index];
-    const float threshold =
-        label.threshold > 0
-            ? label.threshold
-            : embedders.defaultThreshold(embedKind(classes.find(label.baseClass), classes));
+    const float threshold = label.threshold > 0 ? label.threshold : embedder.defaultThreshold();
     const std::vector<PhotoAgreement> agreement = photoAgreement(label);
     float mean = 0;
     for (const PhotoAgreement& a : agreement) mean += a.agreement;
@@ -288,27 +207,23 @@ void printReport(const LabelFolder& f, const Change* change, const LabelLibrary&
         std::printf("; they agree at %.2f on average (recognition needs %.2f)", mean, threshold);
     std::printf(".\n");
     // A photo that agrees much less than the rest probably shows something
-    // else, or the item from a very unusual angle. (Two photos have no "rest".)
+    // else, or the face from a very unusual angle. (Two photos have no "rest".)
     if (agreement.size() > 2)
         for (const PhotoAgreement& a : agreement)
             if (a.agreement < mean - kOutlierGap || a.agreement < threshold)
                 std::printf(
                     "  Check %s: it agrees with the others only at %.2f. Does it show the "
-                    "same %s?\n",
-                    a.image.c_str(), a.agreement, label.baseClass.c_str());
-    if (missing && !f.cache.wholePhoto)
-        std::printf(
-            "  Photos without a %s found aren't used. For close-ups of the item, add  "
-            "whole_photo: true  to %s\n",
-            label.baseClass.c_str(), settingsFile.c_str());
+                    "same person?\n",
+                    a.image.c_str(), a.agreement);
+    if (missing) std::printf("  Photos where no face was found aren't used.\n");
     if (used < kRecommendedPhotos)
         std::printf("  Tip: 5-10 photos from different angles and in different light work best.\n");
 }
 
-// Warns about pairs of labels of the same class that the recognizer would
-// have trouble telling apart. Only pairs with a label in `changed`, unless `all`.
+// Warns about pairs of labels that the recognizer would have trouble telling
+// apart. Only pairs with a label in `changed`, unless `all`.
 void warnLookAlikes(const LabelLibrary& library, const std::map<std::string, Change>& changed,
-                    bool all, const ClassRegistry& classes, const Embedders& embedders) {
+                    bool all, const IEmbedder& embedder) {
     const float margin = RecognizerParams{}.minMargin;
     const std::vector<CustomLabel>& labels = library.labels();
     auto lookAlike = [](const LabelConfusion& c) {
@@ -318,23 +233,21 @@ void warnLookAlikes(const LabelLibrary& library, const std::map<std::string, Cha
         for (size_t j = i + 1; j < labels.size(); ++j) {
             const CustomLabel& a = labels[i];
             const CustomLabel& b = labels[j];
-            if (a.baseClass != b.baseClass) continue;
             if (!all && !changed.count(a.name) && !changed.count(b.name)) continue;
-            const float fallback =
-                embedders.defaultThreshold(embedKind(classes.find(a.baseClass), classes));
+            const float fallback = embedder.defaultThreshold();
             const LabelConfusion ab =
                 labelConfusion(a, b, b.threshold > 0 ? b.threshold : fallback, margin);
             const LabelConfusion ba =
                 labelConfusion(b, a, a.threshold > 0 ? a.threshold : fallback, margin);
             if (!lookAlike(ab) && !lookAlike(ba)) continue;
             std::printf(
-                "Warning: '%s' and '%s' (both %s) look alike. Photos of %s score %.2f as %s and "
+                "Warning: '%s' and '%s' look alike. Photos of %s score %.2f as %s and "
                 "%.2f as %s on average; photos of %s score %.2f as %s and %.2f as %s. Recognition "
                 "needs a lead of %.2f, so it may mix them up or show neither. Photos showing how "
-                "they differ help; if they are the same item, keep one label.\n",
-                a.name.c_str(), b.name.c_str(), a.baseClass.c_str(), a.name.c_str(), ab.ownScore,
-                a.name.c_str(), ab.otherScore, b.name.c_str(), b.name.c_str(), ba.ownScore,
-                b.name.c_str(), ba.otherScore, a.name.c_str(), margin);
+                "they differ help; if they are the same person, keep one label.\n",
+                a.name.c_str(), b.name.c_str(), a.name.c_str(), ab.ownScore, a.name.c_str(),
+                ab.otherScore, b.name.c_str(), b.name.c_str(), ba.ownScore, b.name.c_str(),
+                ba.otherScore, a.name.c_str(), margin);
         }
 }
 
@@ -377,70 +290,47 @@ std::string describe(const SyncPlan& plan) {
 }  // namespace
 
 int syncLabels(LabelLibrary& library, Detector& detector, const ClassRegistry& classes,
-               Embedders& embedders, bool all) {
+               IEmbedder& embedder, bool all) {
     std::map<std::string, Change> changes;
-    std::map<std::string, std::string> problems;
     for (const LabelFolder& f : library.folders()) {
         if (!f.problem.empty()) continue;
-        // The class: set in label.yml, or chosen from the photos by an earlier sync.
-        ClassId base = -1;
-        if (!f.settings.baseClass.empty()) {
-            base = classes.find(f.settings.baseClass);
-            if (base < 0 || classes.kind(base) == ClassKind::Custom) {
-                problems[f.name] = (fs::path(f.path) / kSettingsFile).string() +
-                                   ": unknown class '" + f.settings.baseClass +
-                                   "' (see --list-classes)";
-                continue;
-            }
-        } else if (f.cache.autoClass) {
-            base = classes.find(f.cache.baseClass);
-            if (base >= 0 && classes.kind(base) == ClassKind::Custom) base = -1;
-        }
-        const std::string model = base >= 0 ? embedders.modelId(embedKind(base, classes)) : "";
-        const SyncPlan plan = planSync(f.settings, f.cache, f.photos, model);
+        const SyncPlan plan = planSync(f.cache, f.photos, embedder.modelId());
         if (plan.empty()) continue;
-        changes[f.name] = syncFolder(f, base, plan, detector, classes, embedders);
+        changes[f.name] = syncFolder(f, plan, detector, classes, embedder);
     }
     library.load();
 
     if (all && library.folders().empty())
         std::printf(
-            "No labels in %s. Make a folder there for each item (e.g. %s/my_mug/) and put "
-            "5-10 photos of it in it.\n",
+            "No labels in %s. Make a folder there for each person (e.g. %s/alex/) and put "
+            "5-10 photos of their face in it.\n",
             library.dir().c_str(), library.dir().c_str());
     for (const LabelFolder& f : library.folders()) {
-        const std::string problem = !f.problem.empty()       ? f.problem
-                                    : problems.count(f.name) ? problems[f.name]
-                                                             : "";
-        if (!problem.empty()) {
-            std::printf("Label '%s' can't be used: %s\n", f.name.c_str(), problem.c_str());
+        if (!f.problem.empty()) {
+            std::printf("Label '%s' can't be used: %s\n", f.name.c_str(), f.problem.c_str());
             continue;
         }
         const auto change = changes.find(f.name);
         if (change == changes.end() && !all) continue;
-        printReport(f, change == changes.end() ? nullptr : &change->second, library, classes,
-                    embedders);
+        printReport(f, change == changes.end() ? nullptr : &change->second, library, embedder);
     }
-    warnLookAlikes(library, changes, all, classes, embedders);
+    warnLookAlikes(library, changes, all, embedder);
     if (!library.loosePhotos().empty())
         std::printf(
             "%zu photo(s) in %s aren't in a label folder (e.g. %s). Each label is a folder "
-            "of photos, e.g. %s/my_mug/.\n",
+            "of photos, e.g. %s/alex/.\n",
             library.loosePhotos().size(), library.dir().c_str(),
             library.loosePhotos().front().c_str(), library.dir().c_str());
     return static_cast<int>(changes.size());
 }
 
 std::vector<std::string> missingForSync(const std::vector<std::string>& loaded) {
-    std::vector<std::string> missing;
-    for (const char* name : {"yolo", "face", "hand"})
-        if (std::find(loaded.begin(), loaded.end(), name) == loaded.end()) missing.push_back(name);
-    return missing;
+    if (std::find(loaded.begin(), loaded.end(), "face") != loaded.end()) return {};
+    return {"face"};
 }
 
-void enroll(const std::string& name, const std::string& classHint,
-            const std::vector<std::string>& images, bool wholePhoto, Detector& detector,
-            const ClassRegistry& classes, Embedders& embedders, LabelLibrary& library,
+void enroll(const std::string& name, const std::vector<std::string>& images, Detector& detector,
+            const ClassRegistry& classes, IEmbedder& embedder, LabelLibrary& library,
             bool mustExist) {
     if (const std::string why = labelNameProblem(name); !why.empty())
         throw std::runtime_error("'" + name + "' can't be a label name: " + why);
@@ -457,33 +347,6 @@ void enroll(const std::string& name, const std::string& classHint,
     if (f && !f->problem.empty())
         throw std::runtime_error("Label '" + name + "' can't be used: " + f->problem);
     const std::string folder = library.folder(name);
-    const std::string settingsFile = (fs::path(folder) / kSettingsFile).string();
-
-    LabelSettings settings = f ? f->settings : LabelSettings{};
-    bool newSettings = false;
-    if (!classHint.empty()) {
-        const ClassId base = classes.find(classHint);
-        if (base < 0 || classes.kind(base) == ClassKind::Custom)
-            throw std::runtime_error("Unknown class '" + classHint + "' (see --list-classes)");
-        const std::string current = !settings.baseClass.empty() ? settings.baseClass
-                                    : f                         ? f->cache.baseClass
-                                                                : "";
-        if (!current.empty() && current != classHint)
-            throw std::runtime_error("'" + name + "' is a " + current + ", not a " + classHint +
-                                     " (to change that, set its class in " + settingsFile + ")");
-        newSettings = settings.baseClass != classHint;
-        settings.baseClass = classHint;
-    }
-    if (wholePhoto && !settings.wholePhoto) {
-        if (f && !f->cache.photos.empty())
-            throw std::runtime_error("'" + name +
-                                     "' finds the item in each photo, and --whole-photo would "
-                                     "change that for all of its photos. To do that, set "
-                                     "whole_photo: true in " +
-                                     settingsFile);
-        settings.wholePhoto = true;
-        newSettings = true;
-    }
     // Check every photo before copying any.
     for (const std::string& path : images) {
         if (!fs::is_regular_file(path)) throw std::runtime_error("No such photo: " + path);
@@ -494,7 +357,6 @@ void enroll(const std::string& name, const std::string& classHint,
     }
 
     fs::create_directories(folder);
-    if (newSettings) writeSettings(settingsFile, settings);
     int copied = 0;
     for (const std::string& path : images) copied += storePhoto(path, folder);
     std::printf("Copied %d photo(s) to %s", copied, folder.c_str());
@@ -503,7 +365,7 @@ void enroll(const std::string& name, const std::string& classHint,
     std::printf("\n");
 
     library.load();
-    syncLabels(library, detector, classes, embedders, false);
+    syncLabels(library, detector, classes, embedder, false);
     if (library.find(name) < 0)
         throw std::runtime_error("'" + name +
                                  "' has no usable photos yet, so it can't be recognized (its "
@@ -514,8 +376,8 @@ void enroll(const std::string& name, const std::string& classHint,
 void listLabels(const LabelLibrary& library) {
     const std::string& dir = library.dir();
     if (library.folders().empty()) {
-        std::cout << "No labels in " << dir << ". Make a folder there for each item (e.g. " << dir
-                  << "/my_mug/) and put 5-10 photos of it in it, or use --enroll.\n";
+        std::cout << "No labels in " << dir << ". Make a folder there for each person (e.g. " << dir
+                  << "/alex/) and put 5-10 photos of their face in it, or use --enroll.\n";
     } else {
         std::cout << "Labels in " << dir << ":\n";
     }
@@ -528,12 +390,7 @@ void listLabels(const LabelLibrary& library) {
             std::cout << "can't be used: " << f.problem << '\n';
             continue;
         }
-        const std::string& base =
-            !f.settings.baseClass.empty() ? f.settings.baseClass : f.cache.baseClass;
-        std::cout << (base.empty() ? "class not chosen yet" : base);
-        if (f.settings.baseClass.empty() && !base.empty()) std::cout << " (chosen from the photos)";
-        std::cout << ", " << f.photos.size() << " photo(s), " << f.usedPhotos() << " usable";
-        if (f.settings.wholePhoto) std::cout << ", whole photos";
+        std::cout << f.photos.size() << " photo(s), " << f.usedPhotos() << " usable";
         if (!f.plan.empty()) {
             pending = true;
             std::cout << "; not synced yet: " << describe(f.plan);

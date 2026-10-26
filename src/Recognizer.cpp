@@ -12,50 +12,16 @@ float sizeOf(const cv::Rect2f& r) { return std::sqrt(std::max(r.area(), 1.0f)); 
 
 }  // namespace
 
-Embedders::Embedders(std::string faceModel, std::string objectModel, Backend backend,
-                     std::string cacheDir)
-    : faceModel_(std::move(faceModel)),
-      objectModel_(std::move(objectModel)),
-      cacheDir_(std::move(cacheDir)),
-      backend_(backend) {}
-
-IEmbedder& Embedders::forKind(ClassKind kind) {
-    if (kind == ClassKind::Face) {
-        if (!face_) face_ = std::make_unique<FaceEmbedder>(faceModel_);
-        return *face_;
-    }
-    // DINOv2 runs on the CPU even when CoreML is chosen: CoreML ran it in 8 ms
-    // instead of 84 ms, but compiling it delayed every launch by 8-38 s, while
-    // recognition only needs a few crops a second on its own thread.
-    if (!object_) object_ = std::make_unique<ObjectEmbedder>(objectModel_, Backend::Cpu, cacheDir_);
-    return *object_;
-}
-
-std::string Embedders::modelId(ClassKind kind) const {
-    return kind == ClassKind::Face ? FaceEmbedder::kModelId : ObjectEmbedder::kModelId;
-}
-
-float Embedders::defaultThreshold(ClassKind kind) const {
-    return kind == ClassKind::Face ? FaceEmbedder::kThreshold : ObjectEmbedder::kThreshold;
-}
-
-std::string Embedders::info(ClassKind kind) {
-    if (kind == ClassKind::Face) return "SFace, OpenCV CPU";
-    forKind(kind);
-    return "DINOv2-small, " + object_->info();
-}
-
 Recognizer::Recognizer(const LabelLibrary& library, const ClassRegistry& classes,
-                       Embedders& embedders, RecognizerParams params)
-    : library_(library), classes_(classes), embedders_(embedders), params_(params) {
-    // Load the models the labels need now, on this thread, so the worker never
-    // creates them and loading errors show up at startup.
-    for (const CustomLabel& label : library_.labels()) {
-        const ClassId base = classes_.find(label.baseClass);
-        const ClassKind kind =
-            classes_.kind(base) == ClassKind::Face ? ClassKind::Face : ClassKind::Object;
-        thresholds_[kind] = embedders_.forKind(kind).defaultThreshold();
-    }
+                       IEmbedder& embedder, RecognizerParams params)
+    : library_(library),
+      classes_(classes),
+      embedder_(embedder),
+      params_(params),
+      threshold_(embedder.defaultThreshold()) {
+    // Load the model now, on this thread, so the worker never loads it and
+    // loading errors show up at startup.
+    if (!library_.labels().empty()) embedder_.load();
     thread_ = std::thread(&Recognizer::work, this);
 }
 
@@ -66,10 +32,6 @@ Recognizer::~Recognizer() {
     }
     wake_.notify_all();
     thread_.join();
-}
-
-std::string Recognizer::baseClassOf(const Track& t) const {
-    return classes_.name(classes_.base(t.classId));
 }
 
 void Recognizer::work() {
@@ -84,33 +46,32 @@ void Recognizer::work() {
         }
         Embedding e;
         try {
-            e = embedders_.forKind(job.kind).embed(job.crop, job.box, job.keypoints);
+            e = embedder_.embed(job.crop, job.box, job.keypoints);
         } catch (const std::exception& ex) {
             std::cerr << "Warning: recognition failed: " << ex.what() << '\n';
         }
         std::lock_guard<std::mutex> lock(mutex_);
-        results_.push_back({job.trackId, job.kind, std::move(e)});
+        results_.push_back({job.trackId, std::move(e)});
         --inFlight_;
     }
 }
 
-void Recognizer::apply(const Result& result, const std::string& baseClass) {
+void Recognizer::apply(const Result& result) {
     TrackIdentity& id = identities_[result.trackId];
     id.pending = false;
     if (result.embedding.empty()) return;
-    const LabelMatch m =
-        library_.match(baseClass, result.embedding, thresholds_[result.kind], params_.minMargin);
+    const LabelMatch m = library_.match(result.embedding, threshold_, params_.minMargin);
     if (m.label >= 0) ++id.votes[m.label];
     // The closest label, matched or not (for the debug view and dump).
     id.closest.clear();
     for (const CustomLabel& label : library_.labels()) {
-        if (label.baseClass != baseClass) continue;
         const float s = labelScore(label, result.embedding);
         if (id.closest.empty() || s > id.closestScore) id.closestScore = s, id.closest = label.name;
     }
     if (debug_)
-        *debug_ << now_ << ',' << result.trackId << ',' << baseClass << ',' << id.closest << ','
-                << id.closestScore << ',' << m.runnerUp << ',' << (m.label >= 0 ? 1 : 0) << ','
+        *debug_ << now_ << ',' << result.trackId << ',' << classes_.name(classes_.face()) << ','
+                << id.closest << ',' << id.closestScore << ',' << m.runnerUp << ','
+                << (m.label >= 0 ? 1 : 0) << ','
                 << (id.label >= 0 ? library_.labels()[id.label].name : "") << '\n';
 
     if (id.label >= 0) {
@@ -147,27 +108,22 @@ void Recognizer::update(const cv::Mat& frame, const std::vector<Track>& tracks, 
         std::lock_guard<std::mutex> lock(mutex_);
         done.swap(results_);
     }
-    for (const Result& r : done) {
-        const auto base = baseClasses_.find(r.trackId);
-        if (base != baseClasses_.end()) apply(r, base->second);
-    }
+    for (const Result& r : done)
+        if (identities_.count(r.trackId)) apply(r);  // not if the track is gone
 
     // 2. Forget tracks that are gone.
     for (auto it = identities_.begin(); it != identities_.end();) {
         const bool alive = std::any_of(tracks.begin(), tracks.end(),
                                        [&](const Track& t) { return t.id == it->first; });
-        if (!alive) baseClasses_.erase(it->first);
         it = alive ? std::next(it) : identities_.erase(it);
     }
 
-    // 3. Send crops of tracks that are due a (new) look: unlabeled ones first,
+    // 3. Send crops of faces that are due a (new) look: unlabeled ones first,
     //    then the ones looked at longest ago.
     std::vector<const Track*> due;
     for (const Track& t : tracks) {
         if (!t.visible || !t.matched) continue;
-        const std::string base = baseClassOf(t);
-        if (!library_.hasLabelsFor(base)) continue;
-        baseClasses_[t.id] = base;
+        if (library_.labels().empty() || classes_.base(t.classId) != classes_.face()) continue;
         const TrackIdentity& id = identities_[t.id];
         if (id.pending) continue;
         const bool resized =
@@ -192,8 +148,6 @@ void Recognizer::update(const cv::Mat& frame, const std::vector<Track>& tracks, 
         if (area.area() <= 0) continue;
         Job job;
         job.trackId = t->id;
-        job.kind = classes_.kind(classes_.base(t->classId)) == ClassKind::Face ? ClassKind::Face
-                                                                               : ClassKind::Object;
         job.crop = frame(area).clone();
         const cv::Point2f origin(static_cast<float>(area.x), static_cast<float>(area.y));
         job.box = cv::Rect2f(t->box.tl() - origin, t->box.size());
