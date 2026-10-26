@@ -1,10 +1,12 @@
 # Object Tracker
 
-Tracks objects through the MacBook camera (or a video file) and draws a live overlay with an ID per object.
-Each run also writes a CSV log of every visible track.
+Tracks people, faces and hands through the MacBook camera (or a video file) and draws a live overlay with
+an ID per track, and a red `TARGET` box on a face lit by a bright light. Each run also writes a CSV log of
+every visible track.
 
-- **Detection:** YOLOv8n for the 80 COCO classes, YuNet for faces, MediaPipe palm detection for hands.
-  The three run side by side; YOLO runs on the GPU / Neural Engine through ONNX Runtime + CoreML.
+- **Detection:** YOLOv8n for people (the model has COCO's 80 classes; only person's scores are read),
+  YuNet for faces, MediaPipe palm detection for hands. The three run side by side; YOLO runs on the GPU /
+  Neural Engine through ONNX Runtime + CoreML.
 - **Tracking:** one Kalman filter per track in real time units; optimal (Hungarian) matching on box overlap
   and center distance; confident detections first, then weak ones to keep existing tracks going (ByteTrack's
   idea). Tracks ride out short drop-outs and wait at the frame edge for objects that left. Each type is
@@ -16,7 +18,8 @@ Each run also writes a CSV log of every visible track.
   bright, a room light switching on, a bright phone or a hand held up to the face don't count. Only faces
   can be targets, and only the brightest lit one at a time (`--no-targeting` turns it off).
 
-The `v2` branch is being rebuilt following [PLAN.md](PLAN.md). `main` holds the original version.
+`v3` is this people-only version. `v2` has every feature (all 80 COCO classes, object labels), and was
+built following [PLAN.md](PLAN.md); `main` holds the original version.
 
 ## Setup (macOS, Apple Silicon)
 ```sh
@@ -34,8 +37,8 @@ ctest --test-dir build           # unit tests (needs googletest)
 
 ## Run
 ```sh
-./build/tracker                          # camera 0, all classes
-./build/tracker --classes person,cup     # only these classes
+./build/tracker                          # camera 0: people, faces and hands
+./build/tracker --classes face,hand      # only these classes (person, face, hand, label names)
 ./build/tracker --video clips/hands_face.mov
 ./build/tracker --video clips/hands_face.mov --no-window   # headless: just the log and a summary
 ./build/tracker --video clips/hands_face.mov --realtime    # play at camera speed, skipping frames when busy
@@ -55,36 +58,30 @@ At startup it prints where each detector runs. CoreML compiles a model on first 
 keeps the result in `.cache/coreml/`. A model runs on CoreML only if CoreML can take all of it; otherwise
 it runs on the CPU, which was faster for the partly supported palm model.
 
-## Custom labels
-Teach it a specific item, such as your mug or a person's face, from a few photos. Each label is a folder of photos in `labels/`:
+## Custom labels (faces)
+Teach it a specific person's face from a few photos, so their face shows their name instead of `face #n`. Each label is a folder of photos in `labels/`:
 
-1. Make a folder named after the item, e.g. `labels/my_mug/` (letters, digits, `_` and `-`; not `TARGET`, which is the red box's tag).
-2. Put **5–10 photos** of it there, from different angles and in different light. JPEG and PNG work; convert iPhone HEIC photos first (`sips -s format jpeg IMG_1234.heic --out IMG_1234.jpg`).
-3. Run the tracker. At startup it looks at new, changed and removed photos, says for each one whether it found the item, and warns about anything that would hurt recognition.
+1. Make a folder named after the person, e.g. `labels/alex/` (letters, digits, `_` and `-`; not `TARGET`, which is the red box's tag).
+2. Put **5–10 photos** of their face there, from different angles and in different light. JPEG and PNG work; convert iPhone HEIC photos first (`sips -s format jpeg IMG_1234.heic --out IMG_1234.jpg`).
+3. Run the tracker. At startup it looks at new, changed and removed photos, says for each one whether it found a face, and warns about anything that would hurt recognition.
 
 ```sh
 ./build/tracker --sync-labels                  # do step 3 now, and check every label
-./build/tracker --list-labels                  # class, photos and usable photos per label
-./build/tracker --enroll my_mug a.jpg b.jpg    # or: copy photos into labels/my_mug/ and sync
-./build/tracker --add-photos my_mug c.jpg      # copy more photos in
-./build/tracker --rename-label my_mug mug
-./build/tracker --remove-label mug             # moves labels/mug/ to labels/.removed/, photos and all
-./build/tracker --classes my_mug               # detect cups, show only the one that is my_mug
+./build/tracker --list-labels                  # photos and usable photos per label
+./build/tracker --enroll alex a.jpg b.jpg      # or: copy photos into labels/alex/ and sync
+./build/tracker --add-photos alex c.jpg        # copy more photos in
+./build/tracker --rename-label alex alexis
+./build/tracker --remove-label alexis          # moves labels/alexis/ to labels/.removed/, photos and all
+./build/tracker --classes alex                 # show only alex's face
+./build/grab_frames clips/new.mov /tmp/alex --crop face --count 8   # face photos from a video
 ```
-- **What the item is:** by default the class that stands out most across the photos (a face rather than the whole person), and it stays. To set it, or for close-ups that show just the item, put a `label.yml` in the folder (`--enroll` writes it for `--class cup` and `--whole-photo`):
-  ```yaml
-  class: cup          # see --list-classes
-  whole_photo: true   # optional: each photo shows just the item
-  ```
-- It stores a neural-network *embedding* of the item in each photo, plus a mirrored copy, in the folder's hidden `.embeddings.yml` (SFace for faces, DINOv2 for objects). Only new or changed photos are looked at again.
-- Photos where the item isn't found aren't used. A sync also points out photos that don't look like the rest, labels with fewer than 5 usable photos, and labels of the same class so alike that recognition may mix them up.
-- Photos are looked at with all three detectors (YOLO, faces, hands). If one didn't load, startup leaves the labels as they were and says so, and `--sync-labels`, `--enroll` and `--add-photos` stop with an error, since the photos would be recorded as not showing the item. With `--no-faces` or `--no-hands`, startup leaves new photos for `--sync-labels`.
-- While tracking, objects of a labeled class are checked in the background a few times a second. A track takes the label after 3 matching checks, and each label is one item, so at most one track has it. Label changes are picked up at the next start.
-- Labeled tracks show the label instead of `class #n`. A face under a bright light still shows `TARGET`.
-- Labels made by an earlier version (one `label.yml` with the embeddings) are converted automatically; the old file is kept as `.label-v1.yml`.
+- It stores a neural-network *embedding* (SFace) of the face in each photo, plus a mirrored copy, in the folder's hidden `.embeddings.yml`. Only new or changed photos are looked at again. An optional `label.yml` can set `threshold:` (how close a face must be to count).
+- Photos without a face aren't used. A sync also points out photos that don't look like the rest, labels with fewer than 5 usable photos, and labels so alike that recognition may mix them up.
+- A sync needs only the face detector. If it didn't load, startup leaves the labels as they were and says so, and `--sync-labels`, `--enroll` and `--add-photos` stop with an error. With `--no-faces`, startup leaves new photos for `--sync-labels`.
+- While tracking, faces are checked in the background a few times a second. A face takes the label after 3 matching checks, and each label is one person, so at most one face has it. Label changes are picked up at the next start.
+- A face under a bright light still shows `TARGET`.
+- **Labels from `v2`:** face labels work as they are. Object labels (e.g. a phone) are reported as unsupported and left untouched, so they still work if you switch back to `v2`; `class:` and `whole_photo:` lines in `label.yml` are ignored. Labels made by an even earlier version (one `label.yml` with the embeddings) are converted automatically; the old file is kept as `.label-v1.yml`.
 - `labels/` holds your photos and isn't committed to git.
-
-Telling *a* mug from *your* mug works when the photos cover the angles you'll show it from. Two identical products (two of the same phone) can't be told apart from pictures alone.
 
 ## Logs
 Each run writes `logs/run_<date>_<time>.csv`: one row per visible track per frame. The columns are `time_ms`, `frame`, `id` (unique for the run), `number` (the one on screen), `class`, `label`, `matched` (0 = not detected this frame), the box, `conf`, `target`, `light_ratio` (faces) and `coasting` (1 = drawn with corners only, as a prediction). To summarize one or more runs:
@@ -104,17 +101,17 @@ Besides IDs it reports flicker and lag per class: how far the shown box is from 
 
 ## Layout
 ```
-src/        Camera (capture thread); ClassRegistry (all class ids); Detector runs the IDetector
-            implementations (YoloDetector, FaceDetector, HandDetector) side by side; OrtModel
-            (ONNX Runtime + CoreML); Tracker (+ KalmanBox, Assignment); Targeting (TARGET);
-            Embedder, Labels, Enrollment, Recognizer (custom labels); Options; Overlay
+src/        Camera (capture thread); ClassRegistry (person, hand, face, labels); Detector runs the
+            IDetector implementations (YoloDetector, FaceDetector, HandDetector) side by side;
+            OrtModel (ONNX Runtime + CoreML); Tracker (+ KalmanBox, Assignment); Targeting (TARGET);
+            Embedder, Labels, Enrollment, Recognizer (face labels); Options; Overlay
             (+ TagLayout); Logger; main
-labels/     custom labels: a folder of photos per label, with optional label.yml (not in git)
+labels/     face labels: a folder of photos per person, with optional label.yml (not in git)
 tools/      replay.cpp: the tracker on saved detections (tracker_replay); grab_frames.cpp:
-            a video's frames, or crops of one class, saved as photos (grab_frames)
+            a video's frames, or face crops, saved as photos (grab_frames)
 tests/      GoogleTest unit tests (tracker_tests)
 scripts/    fetch_models.sh, export_yolo.sh, log_stats.py
-models/     coco.names (tracked); *.onnx (downloaded, not in git)
+models/     *.onnx (downloaded, not in git)
 clips/      reference videos for regression runs (not in git)
 logs/       run logs (not in git)
 ```

@@ -1,4 +1,4 @@
-# Plan: Object Tracker v2
+# Plan: Object Tracker v2 (and v3)
 
 ## Status (2026-10-17): M0–M6 done on the `v2` branch
 Measured on the reference clips, with everything on:
@@ -19,10 +19,26 @@ Added on 2026-10-20 and merged into `v2` (details in the sections below):
 - **UI polish** (`v2-ui`): a new overlay with tags kept off each other, corner-only predicted boxes, a TARGET LOCKED badge, a HUD panel and `h` for help. Drawing takes about 0.2 ms per frame (0.5 ms with the debug view and trails).
 - **Review fixes** (2026-10-23, `fix-*` branches): a label sync runs only when the YOLO, face and hand detectors all loaded; one bad photo no longer stops a sync or startup (a failure that may be temporary is tried again next time); `TARGET` is a reserved label name; folders with problems are reported at startup without a sync; `grab_frames --crop hand` works.
 
+### v3 (2026-10-25, branch `v3`): people, faces, hands and TARGET only
+The user's call: "only focus on faces, hands, persons, and targets. Strip away anything else", keeping custom labels for faces. `v2` keeps every feature.
+- **Detection** (`v3-detection`): YOLO reads only the person score of each box (the model is unchanged, still 80 COCO classes); the class list is person, hand, face plus face labels; `--classes cup` is an error. The tracker's class voting is gone (with one class per kind it never changed anything: replaying the same detections gave byte-identical tracks). `models/coco.names` and `ClassRegistry::fromFile` are gone.
+- **Face labels** (`v3-face-labels`): labels are faces only (SFace). DINOv2, object labels, the automatic class choice, `--class`, `--whole-photo` and OrtModel's free-dimension overrides are gone; a sync needs only the face detector. v2 face labels work unchanged; v2 object labels are reported and left untouched (v2 still uses them); `class:`/`whole_photo:` lines are ignored. This also removed the v2 bug where a misspelled `class:` caused a false "Label photos changed" note under `--no-faces`. `grab_frames --crop face` makes label photos.
+- **Measured on the merged `v3`** (headless, same labels as v2):
+
+| | `hands_face.mov` | `flashlight.mov` |
+|---|---|---|
+| Classes in the log | person, face, hand | person, face, hand |
+| hand / face / person IDs | 4 / 1 / 2 | 4 / 1 / 2 |
+| TARGET episodes | 0 | 8 (624 frames, the same as v2) |
+| Face rows labeled `me` | 2009 / 2026 (99.2%) | 1559 / 1576 (98.9%) |
+| Uncapped FPS | 65.2 | 65.9 |
+
+`--realtime` on `flashlight.mov`: 30.0 FPS with no skipped frames. Unit tests: 122. The only tracking difference from v2: on `hands_face` one person track ends 5 frames sooner, because weak "toothbrush" boxes no longer keep it alive.
+
 Still to do by the user, with the live camera (no clip covers these):
 - a live run: camera capture runs on a background thread now;
 - the UI polish overlay in a live window: the keys, pausing, the help panel, the pulsing TARGET corners;
-- enrolling a real object from 5–10 photos;
+- enrolling a real object from 5–10 photos (v2), or a real face (v3);
 - telling two different items of the same class apart.
 
 Each milestone section below starts with what was built and measured. The original plan text follows it.
