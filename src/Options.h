@@ -22,7 +22,7 @@ struct Options {
     Backend backend = Backend::CoreML;
     ModelPath yoloModel, faceModel, handModel;  // detectors
     ModelPath faceIdModel, objectIdModel;       // recognition (custom labels)
-    std::string names, logDir, cacheDir, labelsDir;
+    std::string logDir, cacheDir, labelsDir;
     bool log = true;
     bool mirror = true;
     bool faces = true;

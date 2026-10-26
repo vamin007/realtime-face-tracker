@@ -53,7 +53,7 @@ protected:
         return targeted;
     }
 
-    ClassRegistry classes = ClassRegistry::fromFile(PROJECT_DIR "/models/coco.names");
+    ClassRegistry classes;  // person, hand, face
     long long frame_ = 0;
 };
 
@@ -115,12 +115,14 @@ TEST_F(TargetingTest, RoomLightChangesDontMakeATarget) {
 
 TEST_F(TargetingTest, OnlyFacesCanBeTargets) {
     TargetSelector selector(classes);
-    const cv::Rect2f phoneBox(900, 300, 120, 200);
+    const cv::Rect2f personBox(900, 150, 300, 550), handBox(60, 300, 150, 180);
     const std::vector<Track> tracks = {makeTrack(1, classes.face(), kFaceBox),
-                                       makeTrack(2, classes.find("cell phone"), phoneBox)};
+                                       makeTrack(2, classes.person(), personBox),
+                                       makeTrack(3, classes.hand(), handBox)};
     Scene scene;
     run(selector, scene, tracks, 60);
-    scene.patches = {{phoneBox, 255}};  // the phone's flashlight, pointed at the camera
+    // Someone else in a bright light, and a hand pointing a flashlight at the camera.
+    scene.patches = {{personBox, 255}, {handBox, 255}};
     EXPECT_EQ(run(selector, scene, tracks, 90), 0);
 }
 

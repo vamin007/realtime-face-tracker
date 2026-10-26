@@ -1,10 +1,18 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <filesystem>
+#include <stdexcept>
+
+#include "ClassRegistry.h"
 #include "Detector.h"
 #include "HandDetector.h"
 #include "YoloDetector.h"
 
 namespace {
+
+// Some of YOLO's other COCO classes.
+constexpr int kCup = 41, kChair = 56, kCellPhone = 67;
 
 // A detector that finds nothing, known only by its name.
 class NamedDetector : public IDetector {
@@ -40,19 +48,19 @@ cv::Mat fakeYoloOutput(int numClasses, const std::vector<FakeBox>& boxes) {
     return out;
 }
 
-const Detection* findClass(const std::vector<Detection>& dets, int cls) {
-    for (const Detection& d : dets)
-        if (d.classId == cls) return &d;
-    return nullptr;
+const Detection* findWeak(const std::vector<Detection>& dets, bool weak) {
+    const auto it =
+        std::find_if(dets.begin(), dets.end(), [&](const Detection& d) { return d.weak == weak; });
+    return it == dets.end() ? nullptr : &*it;
 }
 
 }  // namespace
 
 TEST(DecodeYolo, ScalesBoxesBackToFramePixels) {
-    const cv::Mat out = fakeYoloOutput(3, {{100, 50, 40, 20, 1, 0.9f}});
+    const cv::Mat out = fakeYoloOutput(3, {{100, 50, 40, 20, kCocoPerson, 0.9f}});
     const auto dets = decodeYolo(out, 0.5f, {1280, 720}, {0.4f});
     ASSERT_EQ(dets.size(), 1u);
-    EXPECT_EQ(dets[0].classId, 1);
+    EXPECT_EQ(dets[0].classId, kCocoPerson);
     EXPECT_FLOAT_EQ(dets[0].box.x, 160);  // (100 - 20) / 0.5
     EXPECT_FLOAT_EQ(dets[0].box.y, 80);   // (50 - 10) / 0.5
     EXPECT_FLOAT_EQ(dets[0].box.width, 80);
@@ -63,22 +71,46 @@ TEST(DecodeYolo, ScalesBoxesBackToFramePixels) {
 TEST(DecodeYolo, MergesDuplicatesAndMarksWeakDetections) {
     const cv::Mat out =
         fakeYoloOutput(3, {
-                              {100, 100, 50, 50, 1, 0.90f},  // kept
-                              {102, 101, 50, 50, 1, 0.80f},  // same class duplicate
-                              {101, 100, 50, 52, 2, 0.85f},  // other class, same box
-                              {400, 300, 60, 60, 0, 0.20f},  // weak, kept
-                              {600, 300, 60, 60, 0, 0.05f},  // below low threshold
+                              {100, 100, 50, 50, kCocoPerson, 0.90f},  // kept
+                              {102, 101, 50, 50, kCocoPerson, 0.80f},  // duplicate
+                              {400, 300, 60, 60, kCocoPerson, 0.20f},  // weak, kept
+                              {600, 300, 60, 60, kCocoPerson, 0.05f},  // below low threshold
                           });
     const auto dets = decodeYolo(out, 1.0f, {1280, 720}, {0.4f, 0.1f, 0.45f});
     ASSERT_EQ(dets.size(), 2u);
-    const Detection* strong = findClass(dets, 1);
-    const Detection* weak = findClass(dets, 0);
+    const Detection* strong = findWeak(dets, false);
+    const Detection* weak = findWeak(dets, true);
     ASSERT_NE(strong, nullptr);
     ASSERT_NE(weak, nullptr);
     EXPECT_FLOAT_EQ(strong->conf, 0.90f);
-    EXPECT_FALSE(strong->weak);
-    EXPECT_TRUE(weak->weak);
-    EXPECT_EQ(findClass(dets, 2), nullptr);
+    EXPECT_FLOAT_EQ(weak->conf, 0.20f);
+}
+
+// Other classes' boxes are skipped before NMS: they aren't reported, and a more
+// confident one on the same spot doesn't hide a person.
+TEST(DecodeYolo, ReportsOnlyPeople) {
+    const cv::Mat out = fakeYoloOutput(kCocoClasses, {
+                                                         {300, 300, 100, 200, kCocoPerson, 0.6f},
+                                                         {302, 300, 100, 200, kChair, 0.9f},
+                                                         {800, 300, 60, 100, kCellPhone, 0.95f},
+                                                         {1000, 300, 60, 60, kCup, 0.9f},
+                                                     });
+    const auto dets = decodeYolo(out, 1.0f, {1280, 720}, {0.4f});
+    ASSERT_EQ(dets.size(), 1u);
+    EXPECT_EQ(dets[0].classId, kCocoPerson);
+    EXPECT_FLOAT_EQ(dets[0].conf, 0.6f);
+    EXPECT_FLOAT_EQ(dets[0].box.x, 250);
+}
+
+// A box's person score counts on its own, even where another class scores higher.
+TEST(DecodeYolo, APersonScoreCountsWhateverElseTheBoxScores) {
+    const int boxes = 1;
+    cv::Mat out = fakeYoloOutput(kCocoClasses, {{300, 300, 100, 200, kCocoPerson, 0.5f}});
+    out.ptr<float>()[(4 + kChair) * boxes + 0] = 0.9f;  // the same box, as a chair
+    const auto dets = decodeYolo(out, 1.0f, {1280, 720}, {0.4f});
+    ASSERT_EQ(dets.size(), 1u);
+    EXPECT_EQ(dets[0].classId, kCocoPerson);
+    EXPECT_FLOAT_EQ(dets[0].conf, 0.5f);
 }
 
 TEST(DecodeYolo, ClipsBoxesToTheFrame) {
@@ -111,6 +143,27 @@ TEST(HandBoxFromPalm, FollowsTheHandDirection) {
     const float leftSide = palm.x - hand.x;
     EXPECT_GT(rightSide, leftSide);
     EXPECT_GT(hand.width, hand.height);
+}
+
+// People are reported under the registry's person id.
+TEST(YoloDetector, PeopleGetTheRegistrysPersonId) {
+    EXPECT_EQ(ClassRegistry().person(), kCocoPerson);
+}
+
+// The real model, if it's there: it has COCO's 80 classes, is asked only for
+// people, and a model with another number of classes is refused.
+TEST(YoloDetector, TheModelHasTheCocoClasses) {
+    std::string path = PROJECT_DIR "/models/yolov8n_384x640.onnx";
+    if (!std::filesystem::exists(path)) path = PROJECT_DIR "/models/yolov8n.onnx";
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "missing " << path;
+    const std::string cache = PROJECT_DIR "/.cache/coreml";
+    const cv::Mat frame(720, 1280, CV_8UC3, cv::Scalar::all(114));
+    YoloDetector yolo(path, kCocoClasses, {0.4f}, Backend::Cpu, cache);
+    EXPECT_TRUE(yolo.canDetect(kCocoPerson));
+    EXPECT_FALSE(yolo.canDetect(kCup));
+    EXPECT_NO_THROW(yolo.detect(frame));
+    YoloDetector other(path, 3, {0.4f}, Backend::Cpu, cache);
+    EXPECT_THROW(other.detect(frame), std::runtime_error);
 }
 
 TEST(Detector, NamesTheDetectorsThatLoaded) {

@@ -51,7 +51,6 @@ Options defaultOptions(const std::string& projectDir) {
     opt.handModel = {models + "palm_detection_mediapipe_2023feb.onnx"};
     opt.faceIdModel = {models + "face_recognition_sface_2021dec.onnx"};
     opt.objectIdModel = {models + "dinov2_small.onnx"};
-    opt.names = models + "coco.names";
     opt.logDir = projectDir + "/logs";
     opt.cacheDir = projectDir + "/.cache/coreml";
     opt.labelsDir = projectDir + "/labels";
@@ -61,7 +60,7 @@ Options defaultOptions(const std::string& projectDir) {
 void printUsage() {
     std::cout
         << "Usage: tracker [options]\n"
-           "  --classes a,b,c       only track these classes or labels (e.g. person,hand,my_mug)\n"
+           "  --classes a,b,c       only track these: person, face, hand, labels (e.g. face,hand)\n"
            "  --list-classes        print the classes it knows and exit\n"
            "  --camera N            camera index (default 0)\n"
            "  --video PATH          read a video file instead of the camera\n"
@@ -74,7 +73,7 @@ void printUsage() {
            "  --no-log              don't write a CSV log\n"
            "\nDetection:\n"
            "  --conf N              confidence threshold for all detectors, 0..1\n"
-           "  --conf-yolo N         objects (default 0.4)\n"
+           "  --conf-yolo N         people (default 0.4)\n"
            "  --conf-face N         faces (default 0.6)\n"
            "  --conf-hand N         hands (default 0.6)\n"
            "  --no-faces            turn off face detection\n"
@@ -99,7 +98,7 @@ void printUsage() {
            "  --no-labels           don't recognize labels\n"
            "  --labels-dir DIR      where labels are kept (default labels/)\n"
            "\nModels:\n"
-           "  --model PATH          YOLO (default models/yolov8n_384x640.onnx)\n"
+           "  --model PATH          YOLO, for people (default models/yolov8n_384x640.onnx)\n"
            "  --face-model PATH     face detector (default "
            "models/face_detection_yunet_2023mar.onnx)\n"
            "  --hand-model PATH     hand detector (default "

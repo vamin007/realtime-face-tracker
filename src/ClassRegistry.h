@@ -4,16 +4,21 @@
 
 #include "Detection.h"
 
-enum class ClassKind { Object, Hand, Face, Custom };
+enum class ClassKind { Object, Hand, Face, Custom };  // Object: a YOLO class (person)
 
-// The one place class ids come from: the COCO classes first (ids 0-79, in YOLO's
-// output order), then the built-in hand and face classes, then custom labels.
+// The one place class ids come from: YOLO's classes first (just person, id 0,
+// unless other names are given), then the built-in hand and face classes, then
+// custom labels.
 class ClassRegistry {
 public:
+    // The tracker's classes: person, hand and face.
+    ClassRegistry();
+    // YOLO's classes named here, in its output order, instead of just person
+    // (tests use stand-ins; fromFile reads a names file, one name per line).
     explicit ClassRegistry(const std::vector<std::string>& cocoNames);
     static ClassRegistry fromFile(const std::string& cocoNamesPath);
 
-    // A custom label refines a built-in class, e.g. "my_mug" refines "cup".
+    // A custom label refines a built-in class, e.g. "me" refines "face".
     ClassId addCustom(const std::string& name, ClassId baseClass);
 
     ClassId find(const std::string& name) const;  // -1 if unknown
@@ -23,7 +28,7 @@ public:
 
     bool valid(ClassId id) const { return id >= 0 && id < size(); }
     int size() const { return static_cast<int>(entries_.size()); }
-    int cocoCount() const { return cocoCount_; }
+    int cocoCount() const { return cocoCount_; }  // YOLO's classes listed here
 
     ClassId person() const { return person_; }
     ClassId hand() const { return hand_; }

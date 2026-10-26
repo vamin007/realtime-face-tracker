@@ -16,6 +16,9 @@ std::string trim(const std::string& s) {
 
 }  // namespace
 
+// Of YOLO's 80 COCO classes only person is tracked; YoloDetector skips the rest.
+ClassRegistry::ClassRegistry() : ClassRegistry(std::vector<std::string>{"person"}) {}
+
 ClassRegistry::ClassRegistry(const std::vector<std::string>& cocoNames) {
     for (const std::string& raw : cocoNames) {
         const std::string name = trim(raw);

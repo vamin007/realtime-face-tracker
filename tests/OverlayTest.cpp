@@ -28,7 +28,7 @@ int redPixels(const cv::Mat& frame) {
 
 class OverlayTest : public ::testing::Test {
 protected:
-    ClassRegistry classes = ClassRegistry::fromFile(PROJECT_DIR "/models/coco.names");
+    ClassRegistry classes;  // person, hand, face
     std::vector<Track> crowd() const {
         return {makeTrack(1, 1, classes.person(), {300, 150, 700, 570}),
                 makeTrack(2, 1, classes.face(), {540, 200, 200, 260}),

@@ -5,14 +5,6 @@
 #include <opencv2/imgproc.hpp>
 #include <stdexcept>
 
-namespace {
-
-// YOLO often reports one object under two similar classes (tv and laptop) with
-// nearly the same box. Boxes overlapping this much are merged across classes.
-constexpr float kCrossClassIou = 0.7f;
-
-}  // namespace
-
 YoloDetector::YoloDetector(const std::string& modelPath, int numClasses,
                            DetectorThresholds thresholds, Backend backend,
                            const std::string& cacheDir)
@@ -44,55 +36,44 @@ std::vector<Detection> YoloDetector::detect(const cv::Mat& frame) {
     const cv::Mat out = model_->run(blob).at(0);
     if (out.dims != 3 || out.size[1] - 4 != numClasses_)
         throw std::runtime_error("YOLO model has " + std::to_string(out.size[1] - 4) +
-                                 " classes but coco.names lists " + std::to_string(numClasses_));
+                                 " classes, expected " + std::to_string(numClasses_) +
+                                 " (COCO's, person first)");
     return decodeYolo(out, scale, frame.size(), th_);
 }
 
 std::vector<Detection> decodeYolo(const cv::Mat& output, float scale, cv::Size frameSize,
                                   const DetectorThresholds& th) {
-    const int attrs = output.size[1];
+    // One row per attribute (cx, cy, w, h, then one score per class), one column
+    // per candidate box. Only the box rows and person's scores are read: boxes of
+    // other classes never become candidates, so they never reach NMS.
     const int numBoxes = output.size[2];
-    const int numClasses = attrs - 4;
-    // [attrs, boxes] -> [boxes, attrs]: one row per candidate box.
-    const cv::Mat preds =
-        cv::Mat(attrs, numBoxes, CV_32F, const_cast<float*>(output.ptr<float>())).t();
+    const float* rows = output.ptr<float>();
+    auto row = [&](int attr) { return rows + static_cast<size_t>(attr) * numBoxes; };
+    const float *cxs = row(0), *cys = row(1), *ws = row(2), *hs = row(3);
+    const float* personScores = row(4 + kCocoPerson);
 
     std::vector<cv::Rect2d> boxes;
     std::vector<float> scores;
-    std::vector<int> classIds;
-    for (int i = 0; i < preds.rows; ++i) {
-        const float* row = preds.ptr<float>(i);
-        const float* best = std::max_element(row + 4, row + 4 + numClasses);
-        if (*best < th.low) continue;
-        const float cx = row[0] / scale, cy = row[1] / scale;
-        const float w = row[2] / scale, h = row[3] / scale;
+    for (int i = 0; i < numBoxes; ++i) {
+        if (personScores[i] < th.low) continue;
+        const float cx = cxs[i] / scale, cy = cys[i] / scale;
+        const float w = ws[i] / scale, h = hs[i] / scale;
         boxes.emplace_back(cx - w / 2, cy - h / 2, w, h);
-        scores.push_back(*best);
-        classIds.push_back(static_cast<int>(best - (row + 4)));
+        scores.push_back(personScores[i]);
     }
 
-    // Duplicates within a class first, then near-identical boxes across classes.
     std::vector<int> keep;
-    cv::dnn::NMSBoxesBatched(boxes, scores, classIds, th.low, th.nms, keep);
-    std::vector<cv::Rect2d> keptBoxes;
-    std::vector<float> keptScores;
-    for (int k : keep) {
-        keptBoxes.push_back(boxes[k]);
-        keptScores.push_back(scores[k]);
-    }
-    std::vector<int> keepAcross;
-    cv::dnn::NMSBoxes(keptBoxes, keptScores, th.low, kCrossClassIou, keepAcross);
+    cv::dnn::NMSBoxes(boxes, scores, th.low, th.nms, keep);
 
     const cv::Rect2f bounds(0, 0, static_cast<float>(frameSize.width),
                             static_cast<float>(frameSize.height));
     std::vector<Detection> result;
-    for (int j : keepAcross) {
-        const int k = keep[j];
+    for (int k : keep) {
         const cv::Rect2f box = cv::Rect2f(boxes[k]) & bounds;
         if (box.area() <= 0) continue;
         Detection d;
         d.box = box;
-        d.classId = classIds[k];
+        d.classId = kCocoPerson;
         d.conf = scores[k];
         d.weak = scores[k] < th.conf;
         result.push_back(std::move(d));

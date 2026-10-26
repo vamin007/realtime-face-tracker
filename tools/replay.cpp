@@ -60,6 +60,7 @@ std::vector<Frame> readDetections(const std::string& path, const ClassRegistry& 
         if (frame > 0) msPerFrame = frames[frame].timeMs / frame;
         Detection d;
         d.classId = classes.find(f[2]);
+        if (d.classId < 0) continue;  // a class it doesn't track (in dumps made before v3)
         d.conf = std::stof(f[3]);
         d.weak = f[4] == "1";
         d.box = {std::stof(f[5]), std::stof(f[6]), std::stof(f[7]), std::stof(f[8])};
@@ -241,7 +242,7 @@ int main(int argc, char** argv) try {
                      "[name=value ...]\n";
         return 1;
     }
-    const ClassRegistry classes = ClassRegistry::fromFile(PROJECT_DIR "/models/coco.names");
+    const ClassRegistry classes;
     TrackerParams params;
     bool listTracks = false;
     std::string samplesPath;

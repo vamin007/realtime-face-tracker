@@ -51,7 +51,7 @@ struct ClassFilter {
     std::set<ClassId> labelOnly;  // base classes requested only through a label
     std::set<int> labels;         // requested labels (indices into the library)
 
-    // Asking for "my_mug" detects cups but shows only the cup recognized as my_mug.
+    // Asking for "me" detects faces but shows only the face recognized as me.
     bool shows(const Track& t, const ClassRegistry& classes, const Recognizer* recognizer) const {
         if (!labelOnly.count(classes.base(t.classId))) return true;
         const int label = recognizer ? recognizer->labelOf(t.id) : -1;
@@ -68,9 +68,14 @@ ClassFilter resolveClasses(const std::string& csv, const ClassRegistry& classes,
         name = trim(name);
         if (name.empty()) continue;
         const ClassId id = classes.find(name);
-        if (id < 0)
-            throw std::runtime_error("Unknown class or label '" + name +
-                                     "' (see --list-classes and --list-labels)");
+        if (id < 0) {
+            std::string known;  // "person, hand, face"
+            for (ClassId c = 0; c < classes.size(); ++c)
+                if (classes.kind(c) != ClassKind::Custom)
+                    known += (known.empty() ? "" : ", ") + classes.name(c);
+            throw std::runtime_error("Unknown class or label '" + name + "' (classes: " + known +
+                                     "; labels: see --list-labels)");
+        }
         if (classes.kind(id) == ClassKind::Custom) {
             filter.detect.insert(classes.base(id));
             filter.labelOnly.insert(classes.base(id));
@@ -99,7 +104,7 @@ void addDetector(Detector& detector, const ModelPath& model, Make make) {
 void buildDetectors(Detector& detector, const Options& opt, const ClassRegistry& classes) {
     detector.setParallel(opt.parallel);
     addDetector(detector, opt.yoloModel, [&] {
-        return std::make_unique<YoloDetector>(opt.yoloModel.path, classes.cocoCount(),
+        return std::make_unique<YoloDetector>(opt.yoloModel.path, kCocoClasses,
                                               DetectorThresholds{opt.confYolo}, opt.backend,
                                               opt.cacheDir);
     });
@@ -176,7 +181,7 @@ int main(int argc, char** argv) try {
     Options opt = defaultOptions(PROJECT_DIR);
     if (!parseArgs(std::vector<std::string>(argv + 1, argv + argc), opt)) return 0;
 
-    ClassRegistry classes = ClassRegistry::fromFile(opt.names);
+    ClassRegistry classes;  // person, hand and face; labels are added to it below
     LabelLibrary library(opt.labelsDir);
     library.load();  // label folders (ones made by an older version are converted)
 
