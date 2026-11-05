@@ -125,6 +125,25 @@ bool isPhotoName(const std::string& fileName) {
     return false;
 }
 
+bool isAutoPhotoName(const std::string& fileName) {
+    // auto_ + 8 digits + _ + 6 digits, then _N or nothing, then .jpg
+    const std::string prefix = "auto_", ext = ".jpg";
+    auto digits = [&](size_t from, size_t n) {
+        if (from + n > fileName.size()) return false;
+        for (size_t i = from; i < from + n; ++i)
+            if (!std::isdigit(static_cast<unsigned char>(fileName[i]))) return false;
+        return true;
+    };
+    if (fileName.size() < 24 || fileName.compare(0, prefix.size(), prefix) != 0 || !digits(5, 8) ||
+        fileName[13] != '_' || !digits(14, 6))
+        return false;
+    const std::string rest = fileName.substr(20);  // "_N.jpg" or ".jpg"
+    if (rest == ext) return true;
+    const size_t n = rest.size() - ext.size();
+    return rest.size() > ext.size() + 1 && rest[0] == '_' &&
+           rest.compare(n, ext.size(), ext) == 0 && digits(21, n - 1);
+}
+
 std::vector<PhotoFile> listPhotos(const std::string& folder) {
     std::vector<PhotoFile> photos;
     std::error_code ec;
@@ -170,6 +189,12 @@ LabelSettings readSettings(const std::string& file) {
             if (t < 0 || t > 1)
                 throw std::runtime_error(file + ": threshold should be a number from 0 to 1");
             s.threshold = t;
+        } else if (key == "auto_photos") {
+            // YAML's true and false are read as 1 and 0.
+            const int on = node.isInt() ? static_cast<int>(node) : -1;
+            if (on != 0 && on != 1)
+                throw std::runtime_error(file + ": auto_photos should be true or false");
+            s.autoPhotos = on == 1;
         } else if (key == "class" || key == "whole_photo") {
             // An earlier version's settings: every label is a face now, found in each photo.
             if (key == "class") {
@@ -181,7 +206,7 @@ LabelSettings readSettings(const std::string& file) {
             s.oldKeys.push_back(key);
         } else {
             throw std::runtime_error(file + ": unknown setting '" + key +
-                                     "' (it can set threshold)");
+                                     "' (it can set threshold and auto_photos)");
         }
     }
     return s;
@@ -194,6 +219,12 @@ void writeSettings(const std::string& file, const LabelSettings& settings) {
     out.writeComment("threshold: similarity needed to recognize the face, 0-1; 0 = the model's");
     out.writeComment("           default");
     out << "threshold" << settings.threshold;
+    // Written only when turned off, so the files of labels that don't use it stay as they were.
+    if (!settings.autoPhotos) {
+        out.writeComment("auto_photos: 0 (or false) = no photos are taken of the face while it's");
+        out.writeComment("             recognized");
+        out << "auto_photos" << 0;
+    }
 }
 
 bool readCache(const std::string& file, LabelCache& cache) {
@@ -260,6 +291,26 @@ void writeCache(const std::string& file, const LabelCache& cache) {
         out << "]";
     }
     fs::rename(temp, file);
+}
+
+bool appendPhotoRecord(const std::string& folder, PhotoRecord record, const std::string& removed) {
+    const std::string file = (fs::path(folder) / kCacheFile).string();
+    LabelCache cache;
+    if (!readCache(file, cache)) return false;
+    const fs::path photo = fs::path(folder) / record.file.name;
+    record.file.size = static_cast<long long>(fs::file_size(photo));
+    record.file.mtime = mtimeOf(photo);
+    cache.photos.erase(std::remove_if(cache.photos.begin(), cache.photos.end(),
+                                      [&](const PhotoRecord& r) {
+                                          return r.file.name == record.file.name ||
+                                                 r.file.name == removed;
+                                      }),
+                       cache.photos.end());
+    cache.photos.push_back(std::move(record));
+    std::sort(cache.photos.begin(), cache.photos.end(),
+              [](const PhotoRecord& a, const PhotoRecord& b) { return a.file.name < b.file.name; });
+    writeCache(file, cache);
+    return true;
 }
 
 SyncPlan planSync(const LabelCache& cache, const std::vector<PhotoFile>& photos,
@@ -392,7 +443,8 @@ void LabelLibrary::load() {
 
         // The label as the last sync left it.
         if (f.cache.baseClass == kFaceClass) {
-            CustomLabel label{f.name, f.cache.model, f.settings.threshold, {}};
+            CustomLabel label{
+                f.name, f.cache.model, f.settings.threshold, {}, f.settings.autoPhotos};
             for (const PhotoRecord& r : f.cache.photos) {
                 if (!r.used) continue;
                 label.samples.push_back({r.file.name, r.roi, false, r.embedding});
@@ -409,13 +461,27 @@ void LabelLibrary::save(const CustomLabel& label) const {
     const fs::path path = folder(label.name);
     fs::create_directories(path);
     writeCache((path / kCacheFile).string(), cacheOf(label, path));
-    writeSettings((path / kSettingsFile).string(), {label.threshold});
+    writeSettings((path / kSettingsFile).string(), {label.threshold, label.autoPhotos});
 }
 
 int LabelLibrary::find(const std::string& name) const {
     for (size_t i = 0; i < labels_.size(); ++i)
         if (labels_[i].name == name) return static_cast<int>(i);
     return -1;
+}
+
+void LabelLibrary::addPhoto(int label, const PhotoRecord& record) {
+    std::vector<LabelSample>& samples = labels_.at(label).samples;
+    samples.push_back({record.file.name, record.roi, false, record.embedding});
+    if (!record.mirrored.empty())
+        samples.push_back({record.file.name, record.roi, true, record.mirrored});
+}
+
+void LabelLibrary::removePhoto(int label, const std::string& image) {
+    std::vector<LabelSample>& samples = labels_.at(label).samples;
+    samples.erase(std::remove_if(samples.begin(), samples.end(),
+                                 [&](const LabelSample& s) { return s.image == image; }),
+                  samples.end());
 }
 
 int LabelLibrary::findFolder(const std::string& name) const {
@@ -443,6 +509,7 @@ LabelMatch LabelLibrary::match(const Embedding& e, float defaultThreshold, float
         }
     }
     if (best.label < 0) return {};
+    best.best = best.label;
     best.score = bestScore;
     const CustomLabel& label = labels_[best.label];
     const float threshold = label.threshold > 0 ? label.threshold : defaultThreshold;

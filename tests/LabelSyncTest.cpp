@@ -285,6 +285,60 @@ TEST_F(LabelSync, OnlyNewAndChangedPhotosAreLookedAtAndRemovedOnesDropped) {
     EXPECT_EQ(library.labels()[0].samples.size(), 6u);
 }
 
+// A photo the tracker took of a recognized face (with its record added to the
+// cache) is like any synced photo: not looked at again, and gone once deleted.
+TEST_F(LabelSync, AutoPhotosAreOrdinaryPhotosToASync) {
+    const fs::path alex = fs::path(dir) / "alex";
+    photo(alex / "a.png", 10);
+    photo(alex / "b.png", 60);
+    photo(alex / "c.png", 100);
+    LabelLibrary library(dir);
+    library.load();
+    sync(library);
+    ASSERT_EQ(embedder.calls, 6);
+
+    const std::string name = "auto_20261104_090000.jpg";
+    photo(alex / name, 30);
+    PhotoRecord r;
+    r.file.name = name;  // its size and time are taken from the file
+    r.used = true;
+    r.note = "taken automatically while recognized";
+    r.roi = {30, 30, 40, 50};
+    r.conf = 0.9f;
+    r.embedding = r.mirrored = library.labels()[0].samples[0].embedding;
+    ASSERT_TRUE(appendPhotoRecord(alex.string(), r));
+    EXPECT_FALSE(appendPhotoRecord((fs::path(dir) / "nobody").string(), r)) << "no cache there";
+
+    LabelLibrary again(dir);
+    again.load();
+    EXPECT_FALSE(again.needsSync());
+    ASSERT_EQ(again.labels().size(), 1u);
+    EXPECT_EQ(again.labels()[0].samples.size(), 8u);
+    const std::string report = syncReport(again, true);
+    EXPECT_EQ(embedder.calls, 6) << "not looked at again";
+    EXPECT_TRUE(contains(report, "4 of 4 photo(s) usable")) << report;
+    EXPECT_TRUE(contains(report, "1 taken automatically while recognized: " + name)) << report;
+    testing::internal::CaptureStdout();
+    listLabels(again);
+    EXPECT_TRUE(contains(testing::internal::GetCapturedStdout(), "4 photo(s) (1 automatic)"));
+
+    fs::remove(alex / name);  // the user deletes it
+    again.load();
+    EXPECT_TRUE(again.needsSync());
+    EXPECT_TRUE(contains(syncReport(again), name + ": removed"));
+    EXPECT_EQ(again.labels()[0].samples.size(), 6u);
+
+    // Appending again replaces a record of the same name, and drops one it's told to.
+    photo(alex / name, 30);
+    ASSERT_TRUE(appendPhotoRecord(alex.string(), r));
+    ASSERT_TRUE(appendPhotoRecord(alex.string(), r, "a.png"));
+    LabelCache cache;
+    ASSERT_TRUE(readCache((alex / kCacheFile).string(), cache));
+    ASSERT_EQ(cache.photos.size(), 3u);
+    EXPECT_EQ(cache.photos[0].file.name, name) << "sorted by name";
+    EXPECT_EQ(cache.photos[1].file.name, "b.png");
+}
+
 TEST_F(LabelSync, ASyncLooksOnlyForFaces) {
     photo(fs::path(dir) / "alex" / "a.png", 10);
     LabelLibrary library(dir);

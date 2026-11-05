@@ -160,6 +160,27 @@ Change syncFolder(const LabelFolder& f, const SyncPlan& plan, Detector& detector
     return change;
 }
 
+int autoPhotoCount(const LabelFolder& f) {
+    return static_cast<int>(std::count_if(f.photos.begin(), f.photos.end(), [](const PhotoFile& p) {
+        return isAutoPhotoName(p.name);
+    }));
+}
+
+// The photos the tracker took itself while it recognized the person (the newest
+// few by name), so a wrong one is easy to find and delete.
+void printAutoPhotos(const LabelFolder& f) {
+    std::vector<std::string> names;
+    for (const PhotoFile& p : f.photos)
+        if (isAutoPhotoName(p.name)) names.push_back(p.name);
+    if (names.empty()) return;
+    constexpr size_t kListed = 6;
+    std::string list = names.size() > kListed ? "..., " : "";
+    for (size_t i = names.size() > kListed ? names.size() - kListed : 0; i < names.size(); ++i)
+        list += names[i] + (i + 1 < names.size() ? ", " : "");
+    std::printf("  %zu taken automatically while recognized: %s. Delete any that don't show %s.\n",
+                names.size(), list.c_str(), f.name.c_str());
+}
+
 // What a label is like after a sync: usable photos, how well they agree, and tips.
 void printReport(const LabelFolder& f, const Change* change, const LabelLibrary& library,
                  const IEmbedder& embedder) {
@@ -215,6 +236,7 @@ void printReport(const LabelFolder& f, const Change* change, const LabelLibrary&
                     "  Check %s: it agrees with the others only at %.2f. Does it show the "
                     "same person?\n",
                     a.image.c_str(), a.agreement);
+    printAutoPhotos(f);
     if (missing) std::printf("  Photos where no face was found aren't used.\n");
     if (used < kRecommendedPhotos)
         std::printf("  Tip: 5-10 photos from different angles and in different light work best.\n");
@@ -390,7 +412,10 @@ void listLabels(const LabelLibrary& library) {
             std::cout << "can't be used: " << f.problem << '\n';
             continue;
         }
-        std::cout << f.photos.size() << " photo(s), " << f.usedPhotos() << " usable";
+        std::cout << f.photos.size() << " photo(s)";
+        if (const int automatic = autoPhotoCount(f))
+            std::cout << " (" << automatic << " automatic)";
+        std::cout << ", " << f.usedPhotos() << " usable";
         if (!f.plan.empty()) {
             pending = true;
             std::cout << "; not synced yet: " << describe(f.plan);
