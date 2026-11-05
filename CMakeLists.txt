@@ -30,6 +30,7 @@ add_library(tracker_core STATIC
     src/FaceNet.cpp
     src/Labels.cpp
     src/Recognizer.cpp
+    src/Reinforcement.cpp
     src/Enrollment.cpp
     src/Options.cpp
     src/Overlay.cpp
@@ -71,6 +72,7 @@ if(GTest_FOUND)
         tests/OptionsTest.cpp
         tests/OrtModelTest.cpp
         tests/OverlayTest.cpp
+        tests/ReinforcementTest.cpp
         tests/TagLayoutTest.cpp
         tests/TargetingTest.cpp
         tests/TrackerTest.cpp
