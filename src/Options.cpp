@@ -48,7 +48,6 @@ Options defaultOptions(const std::string& projectDir) {
     // square model if this one hasn't been exported).
     opt.yoloModel = {models + "yolov8n_384x640.onnx"};
     opt.faceModel = {models + "face_detection_yunet_2023mar.onnx"};
-    opt.handModel = {models + "palm_detection_mediapipe_2023feb.onnx"};
     opt.faceIdModel = {models + "face_recognition_sface_2021dec.onnx"};
     opt.logDir = projectDir + "/logs";
     opt.cacheDir = projectDir + "/.cache/coreml";
@@ -59,7 +58,7 @@ Options defaultOptions(const std::string& projectDir) {
 void printUsage() {
     std::cout
         << "Usage: tracker [options]\n"
-           "  --classes a,b,c       only track these: person, face, hand, labels (e.g. face,hand)\n"
+           "  --classes a,b,c       only track these: person, face, labels (e.g. face)\n"
            "  --list-classes        print the classes it knows and exit\n"
            "  --camera N            camera index (default 0)\n"
            "  --video PATH          read a video file instead of the camera\n"
@@ -74,9 +73,7 @@ void printUsage() {
            "  --conf N              confidence threshold for all detectors, 0..1\n"
            "  --conf-yolo N         people (default 0.4)\n"
            "  --conf-face N         faces (default 0.6)\n"
-           "  --conf-hand N         hands (default 0.6)\n"
            "  --no-faces            turn off face detection\n"
-           "  --no-hands            turn off hand detection\n"
            "  --backend B           coreml (GPU / Neural Engine, default) or cpu\n"
            "\nTARGET (a face a red laser dot is on):\n"
            "  --no-targeting        turn it off\n"
@@ -97,8 +94,6 @@ void printUsage() {
            "  --model PATH          YOLO, for people (default models/yolov8n_384x640.onnx)\n"
            "  --face-model PATH     face detector (default "
            "models/face_detection_yunet_2023mar.onnx)\n"
-           "  --hand-model PATH     hand detector (default "
-           "models/palm_detection_mediapipe_2023feb.onnx)\n"
            "\nDeveloper options:\n"
            "  --max-frames N            stop after N frames\n"
            "  --dump-detections PATH    write every raw detection to a CSV\n"
@@ -129,13 +124,10 @@ bool parseArgs(const std::vector<std::string>& args, Options& opt) {
         else if (arg == "--debug") opt.debug = true;
         else if (arg == "--record") opt.record = next();
         else if (arg == "--no-log") opt.log = false;
-        else if (arg == "--conf")
-            opt.confYolo = opt.confFace = opt.confHand = parseFloat(arg, next(), 0, 1);
+        else if (arg == "--conf") opt.confYolo = opt.confFace = parseFloat(arg, next(), 0, 1);
         else if (arg == "--conf-yolo") opt.confYolo = parseFloat(arg, next(), 0, 1);
         else if (arg == "--conf-face") opt.confFace = parseFloat(arg, next(), 0, 1);
-        else if (arg == "--conf-hand") opt.confHand = parseFloat(arg, next(), 0, 1);
         else if (arg == "--no-faces") opt.faces = false;
-        else if (arg == "--no-hands") opt.hands = false;
         else if (arg == "--backend") {
             const std::string b = next();
             if (b == "coreml") opt.backend = Backend::CoreML;
@@ -158,7 +150,6 @@ bool parseArgs(const std::vector<std::string>& args, Options& opt) {
         else if (arg == "--labels-dir") opt.labelsDir = next();
         else if (arg == "--model") opt.yoloModel = {next(), true};
         else if (arg == "--face-model") opt.faceModel = {next(), true};
-        else if (arg == "--hand-model") opt.handModel = {next(), true};
         else if (arg == "--max-frames") opt.maxFrames = parseInt(arg, next(), 1, 100000000);
         else if (arg == "--dump-detections") opt.dumpDetections = next();
         else if (arg == "--dump-laser") opt.dumpLaser = next();

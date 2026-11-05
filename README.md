@@ -1,35 +1,36 @@
 # Object Tracker
 
-Tracks people, faces and hands through the MacBook camera (or a video file) and draws a live overlay with
-an ID per track, and a red `TARGET` box on a face a red laser dot is on. Each run also writes a CSV log of
+Tracks people and faces through the MacBook camera (or a video file) and draws a live overlay with an ID
+per track, and a red `TARGET` box on a face a red laser dot is on. Each run also writes a CSV log of
 every visible track.
 
-- **Detection:** YOLOv8n for people (the model has COCO's 80 classes; only person's scores are read),
-  YuNet for faces, MediaPipe palm detection for hands. The three run side by side; YOLO runs on the GPU /
-  Neural Engine through ONNX Runtime + CoreML.
+- **Detection:** YOLOv8n for people (the model has COCO's 80 classes; only person's scores are read) and
+  YuNet for faces. The two run side by side; YOLO runs on the GPU / Neural Engine through ONNX Runtime +
+  CoreML.
 - **Tracking:** one Kalman filter per track in real time units; optimal (Hungarian) matching on box overlap
   and center distance; confident detections first, then weak ones to keep existing tracks going (ByteTrack's
   idea). Tracks ride out short drop-outs and wait at the frame edge for objects that left. Each type is
-  numbered on its own (`hand #1`, `hand #2`, `face #1`), and numbers are never reused within a run.
+  numbered on its own (`person #1`, `person #2`, `face #1`), and numbers are never reused within a run.
   The filter smooths detection jitter, but a box snaps to its detection when the object moves faster than
-  the filter expects (a waved hand), so it doesn't trail behind.
+  the filter expects (a head turned quickly), so it doesn't trail behind.
 - **TARGET:** when a red laser dot is on a face, that face gets a red box labeled `TARGET` (within about
   0.1 s; released 0.3 s after the dot leaves). The dot must be on the face itself, not just inside its box:
   the face's outline is an oval built from its landmarks (forehead to chin, cheek to cheek), and the pixels
-  around the dot must be that face's skin. A dot on the hair, an ear, the wall behind the head, or a hand
-  in front of the face (its outline from the palm keypoints, not its whole box) doesn't count. A dot is
-  judged against the face's own skin color: much redder and brighter, small and round, often white in
-  the middle. Flashlights, lamps, red lips and red clothes don't count. Only faces can be targets, one at a
-  time; the target follows the dot to another face (`--no-targeting` turns it off; `--laser-redness N`,
-  default 60, sets how much redder than the skin a dot must be).
+  around the dot must be that face's skin. A dot on the hair, an ear or the wall behind the head doesn't
+  count. Hands aren't detected, so a dot on a hand held in front of the face can't be told apart from one
+  on the face. A dot is judged against the face's own skin color: much redder and brighter, small and
+  round, often white in the middle. Flashlights, lamps, red lips and red clothes don't count. Only faces
+  can be targets, one at a time; the target follows the dot to another face (`--no-targeting` turns it
+  off; `--laser-redness N`, default 60, sets how much redder than the skin a dot must be).
 
-`v3` is this people-only version. `v2` has every feature (all 80 COCO classes, object labels), and was
-built following [PLAN.md](PLAN.md); `main` holds the original version.
+`v3` is the people-only version (it also tracks hands; this branch doesn't). `v2` has every feature (all
+80 COCO classes, object labels), and was built following [PLAN.md](PLAN.md); `main` holds the original
+version.
 
 ## Setup (macOS, Apple Silicon)
 ```sh
 brew install cmake opencv onnxruntime googletest clang-format
-scripts/fetch_models.sh          # downloads and checksums the face, hand and recognition models
+scripts/fetch_models.sh          # downloads and checksums the face and recognition models
 scripts/export_yolo.sh 384 640   # YOLO with a 16:9-friendly input (installs Ultralytics in .venv)
 ```
 
@@ -42,15 +43,15 @@ ctest --test-dir build           # unit tests (needs googletest)
 
 ## Run
 ```sh
-./build/tracker                          # camera 0: people, faces and hands
-./build/tracker --classes face,hand      # only these classes (person, face, hand, label names)
+./build/tracker                          # camera 0: people and faces
+./build/tracker --classes face           # only these classes (person, face, label names)
 ./build/tracker --video clips/hands_face.mov
 ./build/tracker --video clips/hands_face.mov --no-window   # headless: just the log and a summary
 ./build/tracker --video clips/hands_face.mov --realtime    # play at camera speed, skipping frames when busy
 ./build/tracker --backend cpu                             # don't use CoreML
 ./build/tracker --debug                                   # show confidences, light ratios, label scores and timings
 ./build/tracker --record clips/new.mov                    # also save the raw camera feed
-./build/tracker --conf-hand 0.5                           # per-detector thresholds: --conf-yolo/-face/-hand
+./build/tracker --conf-face 0.5                           # per-detector thresholds: --conf-yolo/-face
 ./build/tracker --list-classes
 ./build/tracker --help                   # all options
 ```
@@ -61,7 +62,7 @@ The first camera run asks for camera access: allow it for your terminal app in *
 
 At startup it prints where each detector runs. CoreML compiles a model on first use (a few seconds) and
 keeps the result in `.cache/coreml/`. A model runs on CoreML only if CoreML can take all of it; otherwise
-it runs on the CPU, which was faster for the partly supported palm model.
+it runs on the CPU (for a partly supported model that was faster).
 
 ## Custom labels (faces)
 Teach it a specific person's face from a few photos, so their face shows their name instead of `face #n`. Each label is a folder of photos in `labels/`:
@@ -122,8 +123,8 @@ and look at that file for it.
 
 ## Layout
 ```
-src/        Camera (capture thread); ClassRegistry (person, hand, face, labels); Detector runs the
-            IDetector implementations (YoloDetector, FaceDetector, HandDetector) side by side;
+src/        Camera (capture thread); ClassRegistry (person, face, labels); Detector runs the
+            IDetector implementations (YoloDetector, FaceDetector) side by side;
             OrtModel (ONNX Runtime + CoreML); Tracker (+ KalmanBox, Assignment); Targeting (TARGET);
             Embedder, Labels, Enrollment, Recognizer (face labels); Options; Overlay
             (+ TagLayout); Logger; main

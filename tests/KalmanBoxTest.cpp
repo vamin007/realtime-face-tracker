@@ -80,9 +80,9 @@ TEST(KalmanBox, SmoothsSmallJitter) {
     EXPECT_LT(hi - lo, 1.0f) << "detections jump 2 px every frame";
 }
 
-// A waved hand: the box stays on the detections, where a plain constant-velocity
-// filter trails behind.
-TEST(KalmanBox, KeepsUpWithAWavedHand) {
+// Fast back-and-forth motion: the box stays on the detections, where a plain
+// constant-velocity filter trails behind.
+TEST(KalmanBox, KeepsUpWithFastBackAndForthMotion) {
     KalmanBox::Params plain;
     plain.snapStart = plain.snapFull = 1e9f;  // never follows the detection
     KalmanBox snapping({0, 300, 50, 50}, {}), smoothOnly({0, 300, 50, 50}, plain);
@@ -96,7 +96,7 @@ TEST(KalmanBox, KeepsUpWithAWavedHand) {
         snapError += std::abs(snapping.box().x - x) / 60;
         plainError += std::abs(smoothOnly.box().x - x) / 60;
     }
-    EXPECT_LT(snapError, 3.0) << "mean px behind the hand";
+    EXPECT_LT(snapError, 3.0) << "mean px behind the object";
     EXPECT_LT(snapError, plainError / 2);
 }
 

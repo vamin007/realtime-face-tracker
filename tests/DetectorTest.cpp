@@ -6,7 +6,6 @@
 
 #include "ClassRegistry.h"
 #include "Detector.h"
-#include "HandDetector.h"
 #include "YoloDetector.h"
 
 namespace {
@@ -122,29 +121,6 @@ TEST(DecodeYolo, ClipsBoxesToTheFrame) {
     EXPECT_FLOAT_EQ(dets[0].box.width, 25);
 }
 
-TEST(HandBoxFromPalm, ExtendsTowardTheFingers) {
-    const cv::Rect2f palm(100, 100, 100, 100);  // center (150, 150)
-    // Wrist below the palm center, middle finger base above it: fingers point up.
-    const std::vector<cv::Point2f> up = {{150, 190}, {130, 115}, {150, 110}};
-    const cv::Rect2f hand = handBoxFromPalm(palm, up);
-    EXPECT_TRUE((hand & palm) == palm) << "hand box must contain the palm";
-    const float aboveTop = palm.y - hand.y;                                     // finger side
-    const float belowBottom = (hand.y + hand.height) - (palm.y + palm.height);  // wrist side
-    EXPECT_GT(aboveTop, belowBottom);
-    EXPECT_GT(hand.height, hand.width);
-}
-
-TEST(HandBoxFromPalm, FollowsTheHandDirection) {
-    const cv::Rect2f palm(100, 100, 100, 100);
-    // Wrist on the left, fingers pointing right.
-    const std::vector<cv::Point2f> right = {{110, 150}, {185, 130}, {190, 150}};
-    const cv::Rect2f hand = handBoxFromPalm(palm, right);
-    const float rightSide = (hand.x + hand.width) - (palm.x + palm.width);
-    const float leftSide = palm.x - hand.x;
-    EXPECT_GT(rightSide, leftSide);
-    EXPECT_GT(hand.width, hand.height);
-}
-
 // People are reported under the registry's person id.
 TEST(YoloDetector, PeopleGetTheRegistrysPersonId) {
     EXPECT_EQ(ClassRegistry().person(), kCocoPerson);
@@ -170,6 +146,6 @@ TEST(Detector, NamesTheDetectorsThatLoaded) {
     Detector detector;
     EXPECT_TRUE(detector.names().empty());
     detector.add(std::make_unique<NamedDetector>("face"));
-    detector.add(std::make_unique<NamedDetector>("hand"));
-    EXPECT_EQ(detector.names(), (std::vector<std::string>{"face", "hand"}));
+    detector.add(std::make_unique<NamedDetector>("yolo"));
+    EXPECT_EQ(detector.names(), (std::vector<std::string>{"face", "yolo"}));
 }

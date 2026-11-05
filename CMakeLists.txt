@@ -21,7 +21,6 @@ add_library(tracker_core STATIC
     src/OrtModel.cpp
     src/YoloDetector.cpp
     src/FaceDetector.cpp
-    src/HandDetector.cpp
     src/Assignment.cpp
     src/KalmanBox.cpp
     src/Tracker.cpp

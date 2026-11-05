@@ -15,18 +15,16 @@ struct Options {
     std::string classes;  // comma-separated, empty = all; may include custom labels
     float confYolo = 0.4f;
     float confFace = 0.6f;
-    float confHand = 0.6f;
     int camera = 0;
     std::string video;      // play a file instead of the camera
     bool realtime = false;  // play the video at its own speed, skipping frames when busy
     Backend backend = Backend::CoreML;
-    ModelPath yoloModel, faceModel, handModel;  // detectors
-    ModelPath faceIdModel;                      // face recognition (custom labels)
+    ModelPath yoloModel, faceModel;  // detectors
+    ModelPath faceIdModel;           // face recognition (custom labels)
     std::string logDir, cacheDir, labelsDir;
     bool log = true;
     bool mirror = true;
     bool faces = true;
-    bool hands = true;
     bool labels = true;  // recognize custom labels
     bool showTrail = false;
     bool debug = false;  // show brightness and recognition details on the boxes

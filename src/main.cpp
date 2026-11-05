@@ -21,7 +21,6 @@
 #include "Detector.h"
 #include "Enrollment.h"
 #include "FaceDetector.h"
-#include "HandDetector.h"
 #include "Labels.h"
 #include "Latency.h"
 #include "Logger.h"
@@ -69,7 +68,7 @@ ClassFilter resolveClasses(const std::string& csv, const ClassRegistry& classes,
         if (name.empty()) continue;
         const ClassId id = classes.find(name);
         if (id < 0) {
-            std::string known;  // "person, hand, face"
+            std::string known;  // "person, face"
             for (ClassId c = 0; c < classes.size(); ++c)
                 if (classes.kind(c) != ClassKind::Custom)
                     known += (known.empty() ? "" : ", ") + classes.name(c);
@@ -113,12 +112,6 @@ void buildDetectors(Detector& detector, const Options& opt, const ClassRegistry&
             return std::make_unique<FaceDetector>(opt.faceModel.path, classes.face(),
                                                   DetectorThresholds{opt.confFace, 0.1f, 0.3f},
                                                   opt.faceWidth);
-        });
-    if (opt.hands)
-        addDetector(detector, opt.handModel, [&] {
-            return std::make_unique<HandDetector>(opt.handModel.path, classes.hand(),
-                                                  DetectorThresholds{opt.confHand, 0.1f, 0.3f},
-                                                  opt.backend, opt.cacheDir);
         });
     if (detector.empty()) throw std::runtime_error("No detector could be loaded");
 }
@@ -176,7 +169,7 @@ int main(int argc, char** argv) try {
     Options opt = defaultOptions(PROJECT_DIR);
     if (!parseArgs(std::vector<std::string>(argv + 1, argv + argc), opt)) return 0;
 
-    ClassRegistry classes;  // person, hand and face; labels are added to it below
+    ClassRegistry classes;  // person and face; labels are added to it below
     LabelLibrary library(opt.labelsDir);
     library.load();  // label folders (ones made by an older version are converted)
 

@@ -11,7 +11,7 @@ struct DetectorThresholds {
     float nms = 0.45f;  // boxes overlapping more than this are duplicates
 };
 
-// Common interface of the YOLO, face and hand detectors.
+// Common interface of the YOLO and face detectors.
 class IDetector {
 public:
     virtual ~IDetector() = default;

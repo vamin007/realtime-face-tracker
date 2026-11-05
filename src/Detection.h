@@ -13,6 +13,6 @@ struct Detection {
     // but never starts a new one.
     bool weak = false;
     // Model keypoints in frame pixels. Faces: 5 landmarks (right eye, left eye,
-    // nose, right mouth corner, left mouth corner). Hands: 7 palm points, wrist first.
+    // nose, right mouth corner, left mouth corner).
     std::vector<cv::Point2f> keypoints;
 };

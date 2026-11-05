@@ -11,8 +11,9 @@
 // The dot must be on the face itself, not just inside its box: the face's
 // outline is an oval built from its landmarks (eyes, nose, mouth), the dot's
 // center must be inside it, and the pixels around the dot must look like that
-// face's skin. A dot on the hair, an ear, the wall behind the head or a hand in
-// front of the face doesn't count.
+// face's skin. A dot on the hair, an ear or the wall behind the head doesn't
+// count. (Hands aren't detected, so a dot on a hand held in front of the face
+// can't be told apart from one on the face.)
 //
 // A laser dot on a camera image is small, far redder and brighter than the skin
 // around it, and often overexposed to white in the middle with a red rim. Red
@@ -38,7 +39,6 @@ struct TargetParams {
     double dropTime = 0.15;    // s without the dot before it counts as gone (camera misses)
     double releaseTime = 0.3;  // s without the dot before the target is released
     double coastTime = 0.75;   // s the target stays on while its face isn't detected
-    double handRecent = 0.5;   // s: a hand detected confidently this recently hides what's behind it
 };
 
 // What the laser search found on one face.
@@ -92,14 +92,6 @@ private:
 // the eyes. Without landmarks, an oval inside the middle of the box.
 cv::RotatedRect faceOval(const cv::Rect2f& box, const std::vector<cv::Point2f>& landmarks);
 
-// The outline of a hand from its 7 palm keypoints (wrist, the four finger
-// bases, two thumb points): the palm, the fingers reaching out from their bases
-// along the hand, and the thumb. Much tighter than its box when the hand is
-// tilted. Without keypoints, its box.
-std::vector<cv::Point> handShape(const cv::Rect2f& box, const std::vector<cv::Point2f>& keypoints);
-
-// Looks for a laser dot on the face inside `oval`, ignoring anything inside the
-// `hidden` outlines (hands in front of the face).
+// Looks for a laser dot on the face inside `oval`.
 LaserDot findLaserDot(const cv::Mat& frame, const cv::RotatedRect& oval,
-                      const std::vector<std::vector<cv::Point>>& hidden,
                       const TargetParams& params = {});

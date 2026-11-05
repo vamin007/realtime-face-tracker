@@ -10,8 +10,8 @@
 
 struct Track {
     int id;                  // unique for the whole run, across all classes (used in logs)
-    int number = 0;          // per-class number shown on screen ("hand #2"); 0 until confirmed
-    ClassId classId;         // person, hand or face: the class of its detections
+    int number = 0;          // per-class number shown on screen ("face #2"); 0 until confirmed
+    ClassId classId;         // person or face: the class of its detections
     float conf;              // smoothed detection confidence
     cv::Rect2f box;          // current estimate, frame pixels
     bool confirmed = false;  // matched often enough to be shown
@@ -36,18 +36,18 @@ struct TrackerParams {
     int minHits = 3;                // matches needed before a track is shown
     double tentativeTimeout = 0.1;  // s: an unconfirmed track missing this long is dropped
     double lostTimeout = 2.0;       // s: a confirmed track missing this long is dropped
-                                    //    (hands often vanish for over a second, e.g. in hair)
+                                    //    (set for hands, which often vanished for over a second)
     double exitTimeout = 3.0;       // s: ... or this long if it was last seen at the frame edge
     double coastTime = 0.2;         // s: a missing confirmed track stays visible this long
     double thinAfter = 0.1;   // s: ... and is drawn thin (a prediction) once missing this long
     double weakBridge = 1.0;  // s: weak detections alone keep a person (YOLO) visible this long
-    double weakBridgeFaceHand = 2.0;  // s: ... and a face or hand
+    double weakBridgeFace = 2.0;  // s: ... and a face
     double weakTimeout = 5.0;  // s: any track with no confident detection this long is dropped
     double weakReacquire = 0.5;  // s: weak detections match only tracks seen this recently
     float weakNoise = 1.5f;      // weak detections count as this much noisier: they move a box less
-    // s: while unseen, a track's velocity halves this often. Short: a hand the detector
-    // misses mostly turns or changes shape, and holding its box predicted it better
-    // than carrying on at its last speed.
+    // s: while unseen, a track's velocity halves this often. Short: an object the
+    // detector misses mostly turns or changes shape (hands did, when they were tracked),
+    // and holding its box predicted it better than carrying on at its last speed.
     double velocityHalfLife = 0.05;
 
     // Matching. Distances are center distances in units of object size (the

@@ -21,7 +21,7 @@ float sizeOf(const cv::Rect2f& r) { return std::sqrt(std::max(r.area(), 1.0f)); 
 constexpr float kDistanceWeight = 0.5f;
 // Smoothing of the displayed confidence (weight of the newest detection).
 constexpr float kConfSmoothing = 0.4f;
-// Smoothing of a track's typical size; hand boxes change a lot with the hand's pose.
+// Smoothing of a track's typical size; a person's box changes a lot with their pose.
 constexpr float kSizeSmoothing = 0.3f;
 
 }  // namespace
@@ -210,9 +210,9 @@ void Tracker::update(const std::vector<Detection>& detections, double now) {
             (t.box & cv::Rect2f(0, 0, frameSize_.width, frameSize_.height)).area() > 0;
         // A track seen only weakly for a while is hidden (it may be a false
         // detection). YOLO's weak detections are wrong more often than the face
-        // and hand models', so people are hidden sooner.
-        const double bridge = kindOf(t.classId) == ClassKind::Object ? params_.weakBridge
-                                                                     : params_.weakBridgeFaceHand;
+        // model's, so people are hidden sooner.
+        const double bridge =
+            kindOf(t.classId) == ClassKind::Face ? params_.weakBridgeFace : params_.weakBridge;
         const bool weakOnlyTooLong = now - t.lastStrong > bridge;
         t.visible =
             t.confirmed && inView && now - t.lastSeen <= params_.coastTime && !weakOnlyTooLong;

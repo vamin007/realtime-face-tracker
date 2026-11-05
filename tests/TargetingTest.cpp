@@ -69,31 +69,26 @@ std::vector<cv::Point2f> landmarksAt(const cv::Rect2f& box) {
     return moved;
 }
 
-LaserDot find(const Scene& scene, const std::vector<std::vector<cv::Point>>& hidden = {}) {
-    return findLaserDot(scene.render(), faceOval(kFaceBox, kLandmarks), hidden);
+LaserDot find(const Scene& scene) {
+    return findLaserDot(scene.render(), faceOval(kFaceBox, kLandmarks));
 }
 
 class TargetingTest : public ::testing::Test {
 protected:
     // Runs `frames` frames of a scene and returns how many had a target. Tracks
-    // count as confidently detected in every frame unless `weakIds` lists them.
-    int run(TargetSelector& selector, const Scene& scene, std::vector<Track> tracks, int frames,
-            const std::vector<int>& weakIds = {}) {
+    // count as confidently detected in every frame.
+    int run(TargetSelector& selector, const Scene& scene, std::vector<Track> tracks, int frames) {
         const cv::Mat frame = scene.render();
         int targeted = 0;
         for (int i = 0; i < frames; ++i, ++frame_) {
             const double now = frame_ * kFrame;
-            for (Track& t : tracks) {
-                t.lastSeen = now;
-                if (std::find(weakIds.begin(), weakIds.end(), t.id) == weakIds.end())
-                    t.lastStrong = now;
-            }
+            for (Track& t : tracks) t.lastSeen = t.lastStrong = now;
             if (selector.update(frame, tracks, now).active()) ++targeted;
         }
         return targeted;
     }
 
-    ClassRegistry classes;  // person, hand, face
+    ClassRegistry classes;  // person, face
     long long frame_ = 0;
 };
 
@@ -157,39 +152,6 @@ TEST(LaserDot, ADotInTheBoxButNotOnTheFaceIsIgnored) {
         scene.dots = {p};
         EXPECT_FALSE(find(scene).found) << p;
     }
-}
-
-TEST(LaserDot, ADotOnAHandInFrontOfTheFaceIsIgnored) {
-    const cv::Rect2f hand(650, 310, 90, 110);
-    Scene scene;
-    scene.patches = {{hand, kSkin}};  // a hand is skin-colored too
-    scene.dots = {{690, 360}};
-    EXPECT_TRUE(find(scene).found) << "without knowing about the hand";
-    EXPECT_FALSE(find(scene, {handShape(hand, {})}).found);
-}
-
-// A palm held up beside the face, tilted toward it: its fingers reach over the
-// right cheek, but its box covers the left one too.
-const std::vector<cv::Point2f> kTiltedHand = {{760, 470}, {700, 380}, {715, 370}, {730, 362},
-                                              {745, 357}, {770, 440}, {745, 420}};
-
-TEST(HandShape, FollowsATiltedHandInsteadOfItsBox) {
-    const std::vector<cv::Point> shape = handShape({}, kTiltedHand);
-    cv::Mat mask(720, 1280, CV_8U, cv::Scalar(0));
-    cv::fillConvexPoly(mask, shape, cv::Scalar(255));
-    auto in = [&](cv::Point2f p) { return mask.at<uchar>(cv::Point(p)) != 0; };
-    EXPECT_TRUE(in({740, 420})) << "the palm";
-    EXPECT_TRUE(in({680, 300})) << "the fingers, past the finger bases";
-    EXPECT_FALSE(in({620, 300})) << "inside the box, but beside the hand";
-}
-
-TEST(LaserDot, ADotOnTheCheekBesideAHandStillCounts) {
-    Scene scene;
-    scene.dots = {{600, 350}};  // the cheek away from the hand
-    EXPECT_TRUE(find(scene, {handShape({}, kTiltedHand)}).found);
-    scene.dots = {{690, 330}};  // on the fingers
-    scene.patches = {{cv::Rect2f(670, 310, 40, 40), kSkin}};
-    EXPECT_FALSE(find(scene, {handShape({}, kTiltedHand)}).found);
 }
 
 TEST(LaserDot, NoDotNoMatterHowTheFaceIsLit) {
@@ -284,38 +246,13 @@ TEST_F(TargetingTest, ALaserBesideTheHeadIsNotATarget) {
 
 TEST_F(TargetingTest, OnlyFacesCanBeTargets) {
     TargetSelector selector(classes);
-    const cv::Rect2f personBox(900, 150, 300, 550), handBox(60, 300, 150, 180);
+    const cv::Rect2f personBox(900, 150, 300, 550);
     const std::vector<Track> tracks = {makeTrack(1, classes.face(), kFaceBox, kLandmarks),
-                                       makeTrack(2, classes.person(), personBox),
-                                       makeTrack(3, classes.hand(), handBox)};
+                                       makeTrack(2, classes.person(), personBox)};
     Scene scene;
-    scene.patches = {{personBox, kSkin}, {handBox, kSkin}};
-    scene.dots = {{1050, 400}, {135, 390}};  // the laser on someone's shirt, and on a hand
+    scene.patches = {{personBox, kSkin}};
+    scene.dots = {{1050, 400}};  // the laser on someone's shirt
     EXPECT_EQ(run(selector, scene, tracks, 60), 0);
-}
-
-TEST_F(TargetingTest, ALaserOnAHandInFrontOfTheFaceIsNotATarget) {
-    TargetSelector selector(classes);
-    const cv::Rect2f handBox(650, 310, 90, 110);
-    const std::vector<Track> tracks = {makeTrack(1, classes.face(), kFaceBox, kLandmarks),
-                                       makeTrack(2, classes.hand(), handBox)};
-    Scene scene;
-    scene.patches = {{handBox, kSkin}};
-    scene.dots = {{690, 360}};
-    EXPECT_EQ(run(selector, scene, tracks, 60), 0);
-}
-
-// The palm model sometimes weakly mistakes a face for a palm; such a "hand"
-// mustn't hide the face.
-TEST_F(TargetingTest, AWeakPhantomHandDoesNotHideTheFace) {
-    TargetSelector selector(classes);
-    const std::vector<Track> tracks = {makeTrack(1, classes.face(), kFaceBox, kLandmarks),
-                                       makeTrack(2, classes.hand(), cv::Rect2f(560, 220, 170, 230))};
-    Scene scene;
-    run(selector, scene, tracks, 30, {2});  // its last confident detection is long past
-    scene.dots = {{685, 345}};
-    run(selector, scene, tracks, 6, {2});
-    EXPECT_TRUE(selector.target().active());
 }
 
 TEST_F(TargetingTest, TheTargetFollowsTheLaserToAnotherFace) {

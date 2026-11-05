@@ -4,13 +4,13 @@
 
 #include "Detection.h"
 
-enum class ClassKind { Object, Hand, Face, Custom };  // Object: a YOLO class (person)
+enum class ClassKind { Object, Face, Custom };  // Object: a YOLO class (person)
 
-// The one place class ids come from: person (id 0, YOLO's only class here),
-// hand and face, then custom labels.
+// The one place class ids come from: person (id 0, YOLO's only class here)
+// and face, then custom labels.
 class ClassRegistry {
 public:
-    // The tracker's classes: person, hand and face.
+    // The tracker's classes: person and face.
     ClassRegistry();
 
     // A custom label refines a built-in class, e.g. "me" refines "face".
@@ -25,7 +25,6 @@ public:
     int size() const { return static_cast<int>(entries_.size()); }
 
     ClassId person() const { return person_; }
-    ClassId hand() const { return hand_; }
     ClassId face() const { return face_; }
 
 private:
@@ -38,6 +37,5 @@ private:
 
     std::vector<Entry> entries_;
     ClassId person_ = -1;
-    ClassId hand_ = -1;
     ClassId face_ = -1;
 };

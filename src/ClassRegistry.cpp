@@ -11,7 +11,6 @@ const std::string kUnknown = "unknown";
 // Of YOLO's 80 COCO classes only person is tracked; YoloDetector skips the rest.
 ClassRegistry::ClassRegistry() {
     person_ = add("person", ClassKind::Object, -1);
-    hand_ = add("hand", ClassKind::Hand, -1);
     face_ = add("face", ClassKind::Face, -1);
 }
 

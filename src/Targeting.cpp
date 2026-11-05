@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <opencv2/geometry.hpp>  // convexHull
 #include <opencv2/imgproc.hpp>
 
 namespace {
@@ -51,46 +50,17 @@ cv::RotatedRect faceOval(const cv::Rect2f& box, const std::vector<cv::Point2f>& 
             cv::Size2f(box.width * 0.75f, box.height * 0.9f), 0};
 }
 
-std::vector<cv::Point> handShape(const cv::Rect2f& box, const std::vector<cv::Point2f>& keypoints) {
-    std::vector<cv::Point> shape;
-    if (keypoints.size() >= 7) {
-        const cv::Point2f palm = keypoints[2] - keypoints[0];  // wrist -> middle finger base
-        if (length(palm) >= 2) {
-            constexpr float kFinger = 0.9f;  // finger length / palm length
-            constexpr float kGrow = 1.15f;   // finger width, motion blur
-            std::vector<cv::Point2f> points(keypoints.begin(), keypoints.begin() + 7);
-            for (int k = 1; k <= 4; ++k) points.push_back(keypoints[k] + palm * kFinger);
-            points.push_back(keypoints[6] + (keypoints[6] - keypoints[5]));  // thumb tip
-            std::vector<cv::Point2f> hull;
-            cv::convexHull(points, hull);
-            cv::Point2f c(0, 0);
-            for (const cv::Point2f& p : hull) c += p;
-            c *= 1.0f / static_cast<float>(hull.size());
-            for (const cv::Point2f& p : hull) shape.emplace_back(c + (p - c) * kGrow);
-            return shape;
-        }
-    }
-    const cv::Rect r(box);
-    return {r.tl(), {r.x + r.width, r.y}, r.br(), {r.x, r.y + r.height}};
-}
-
 LaserDot findLaserDot(const cv::Mat& frame, const cv::RotatedRect& oval,
-                      const std::vector<std::vector<cv::Point>>& hidden,
                       const TargetParams& params) {
     const cv::Rect roi = oval.boundingRect() & frameRect(frame);
     if (roi.area() <= 0) return {};
     const cv::Mat img = frame(roi);
 
-    // The face: inside the oval and not behind a hand.
+    // The face: inside the oval.
     cv::Mat face(roi.size(), CV_8U, cv::Scalar(0));
     cv::RotatedRect local = oval;
     local.center -= cv::Point2f(static_cast<float>(roi.x), static_cast<float>(roi.y));
     cv::ellipse(face, local, cv::Scalar(255), cv::FILLED);
-    for (const std::vector<cv::Point>& h : hidden) {
-        std::vector<cv::Point> local;
-        for (const cv::Point& p : h) local.push_back(p - roi.tl());
-        cv::fillConvexPoly(face, local, cv::Scalar(0));
-    }
 
     // The skin's typical color: the median of each channel and of redness. A dot
     // is a handful of pixels, so it barely moves a median.
@@ -157,7 +127,7 @@ LaserDot findLaserDot(const cv::Mat& frame, const cv::RotatedRect& oval,
         if (redCount < 2) continue;
 
         // On the face itself: the ring around the dot (past its glow) must be
-        // mostly this face's skin, inside the oval and not behind a hand.
+        // mostly this face's skin, inside the oval.
         const cv::Point2f c(static_cast<float>(centroids.at<double>(i, 0)),
                             static_cast<float>(centroids.at<double>(i, 1)));
         const float radius = std::max(w, h) / 2.0f;
@@ -204,14 +174,6 @@ bool TargetSelector::dotOn(const FaceLaser& f, double now) const {
 
 const Target& TargetSelector::update(const cv::Mat& frame, const std::vector<Track>& tracks,
                                      double now) {
-    // Only a hand detected confidently just now hides the face behind it: the
-    // palm model sometimes weakly mistakes a face for a palm.
-    std::vector<std::vector<cv::Point>> hands;
-    for (const Track& t : tracks)
-        if (t.visible && classes_.kind(classes_.base(t.classId)) == ClassKind::Hand &&
-            now - t.lastStrong <= params_.handRecent)
-            hands.push_back(handShape(t.box, t.keypoints));
-
     // 1. Look for the laser on every face detected in this frame (its landmarks
     //    are fresh then; a predicted box may have drifted off the face).
     for (const Track& t : tracks) {
@@ -220,7 +182,7 @@ const Target& TargetSelector::update(const cv::Mat& frame, const std::vector<Tra
         f.checked = t.matched;
         f.dot = {};
         if (!t.matched) continue;
-        f.dot = findLaserDot(frame, faceOval(t.box, t.keypoints), hands, params_);
+        f.dot = findLaserDot(frame, faceOval(t.box, t.keypoints), params_);
         if (f.dot.found) {
             if (f.onSince < 0 || now - f.lastDot > params_.dropTime) f.onSince = now;
             f.lastDot = now;

@@ -289,7 +289,7 @@ cv::Rect hud(cv::Mat& img, const FrameInfo& info,
     if (info.recording) chips.push_back({"REC", kWhite, kWhite, 0.2, true});
     if (options.debug) chips.push_back({"DEBUG", kWhite, kWhite, 0.2});
     if (options.trails) chips.push_back({"TRAILS", kWhite, kWhite, 0.2});
-    // What is tracked, as "face 1  hand 2" with the numbers stronger than the names.
+    // What is tracked, as "face 1  person 2" with the numbers stronger than the names.
     std::vector<Span> tracked;
     for (const auto& [name, n] : counts) {
         tracked.push_back({name, body, 400, kDim});

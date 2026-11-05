@@ -34,7 +34,7 @@ TEST(TagLayout, TagsStayInsideTheFrame) {
 }
 
 TEST(TagLayout, TagsOfNearbyBoxesDontOverlap) {
-    // A person's box, with a face and two hands near its top-left corner.
+    // A person's box, with a face and two more boxes near its top-left corner.
     TagLayout layout;
     const std::vector<TagLayout::Item> items = {{1, {300, 150, 700, 570}, {100, 24}},
                                                 {2, {300, 155, 200, 250}, {80, 24}},

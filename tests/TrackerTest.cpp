@@ -46,7 +46,7 @@ protected:
         return ids;
     }
 
-    ClassRegistry classes;  // person, hand, face
+    ClassRegistry classes;  // person, face
     long long frame_ = 0;
     std::set<int> seen_;                   // every id that was ever visible
     std::map<int, float> firstX_, lastX_;  // where each id was first and last seen
@@ -127,24 +127,24 @@ TEST_F(TrackerTest, ObjectThatLeavesAndComesBackKeepsId) {
     Tracker tracker(classes);
     tracker.setFrameSize({1280, 720});
     int f = 0;
-    for (; f < 15; ++f) step(tracker, {det(600, 400 + 10.0f * f, classes.hand(), 200)});
+    for (; f < 15; ++f) step(tracker, {det(600, 400 + 10.0f * f, classes.face(), 200)});
     // Sliding off the bottom edge: the box gets cut off and shrinks.
     for (float y = 560; y < 720; y += 40, ++f) {
-        Detection d = det(600, y, classes.hand(), 200);
+        Detection d = det(600, y, classes.face(), 200);
         d.box &= cv::Rect2f(0, 0, 1280, 720);
         step(tracker, {d});
     }
     for (int gap = 0; gap < 75; ++gap, ++f) step(tracker, {});  // 2.5 s out of view
-    for (int k = 0; k < 10; ++k, ++f) step(tracker, {det(650, 380, classes.hand(), 200)});
+    for (int k = 0; k < 10; ++k, ++f) step(tracker, {det(650, 380, classes.face(), 200)});
     EXPECT_EQ(seen_.size(), 1u) << "came back where it left, within the exit timeout";
 }
 
 TEST_F(TrackerTest, JunkBoxesDontInflateATrack) {
     Tracker tracker(classes);
     tracker.setFrameSize({1280, 720});
-    for (int f = 0; f < 10; ++f) step(tracker, {det(500, 300, classes.hand(), 200)});
-    // A weak detection covering most of the frame (seen from the palm model).
-    Detection junk = weakDet(0, 0, classes.hand(), 0);
+    for (int f = 0; f < 10; ++f) step(tracker, {det(500, 300, classes.face(), 200)});
+    // A weak detection covering most of the frame (the palm model gave these).
+    Detection junk = weakDet(0, 0, classes.face(), 0);
     junk.box = {0, 0, 912, 720};
     for (int f = 0; f < 10; ++f) step(tracker, {junk});
     for (const Track& t : tracker.tracks()) EXPECT_LT(t.box.width, 400) << "track " << t.id;
@@ -160,12 +160,11 @@ TEST_F(TrackerTest, BoxStaysVisibleThroughBriefDropOut) {
     EXPECT_TRUE(visibleIds(tracker).empty()) << "hidden after the coast time";
 }
 
-TEST_F(TrackerTest, PeopleFacesAndHandsNeverShareATrack) {
+TEST_F(TrackerTest, PeopleAndFacesNeverShareATrack) {
     Tracker tracker(classes);
     for (int f = 0; f < 5; ++f)
-        step(tracker, {det(100, 100, kPerson), det(100, 100, classes.face()),
-                       det(100, 100, classes.hand())});
-    EXPECT_EQ(visibleIds(tracker).size(), 3u);
+        step(tracker, {det(100, 100, kPerson), det(100, 100, classes.face())});
+    EXPECT_EQ(visibleIds(tracker).size(), 2u);
 }
 
 TEST_F(TrackerTest, WeakDetectionsNeverStartATrack) {
@@ -196,16 +195,16 @@ TEST_F(TrackerTest, WeakDetectionsAloneDontKeepATrackForever) {
     EXPECT_TRUE(tracker.tracks().empty()) << "dropped after the weak timeout";
 }
 
-// The hand model's weak detections are more reliable than YOLO's: a hand seen
+// The face model's weak detections are more reliable than YOLO's: a face seen
 // only weakly stays shown for 2 s (a person for 1 s), and keeps its ID longer.
-TEST_F(TrackerTest, WeaklySeenHandStaysVisibleLonger) {
+TEST_F(TrackerTest, WeaklySeenFaceStaysVisibleLonger) {
     Tracker tracker(classes);
-    for (int f = 0; f < 5; ++f) step(tracker, {det(300, 300, classes.hand())});
-    for (int f = 0; f < 45; ++f) step(tracker, {weakDet(300, 300, classes.hand())});  // 1.5 s
+    for (int f = 0; f < 5; ++f) step(tracker, {det(300, 300, classes.face())});
+    for (int f = 0; f < 45; ++f) step(tracker, {weakDet(300, 300, classes.face())});  // 1.5 s
     EXPECT_EQ(visibleIds(tracker).size(), 1u);
-    for (int f = 0; f < 30; ++f) step(tracker, {weakDet(300, 300, classes.hand())});  // 2.5 s
+    for (int f = 0; f < 30; ++f) step(tracker, {weakDet(300, 300, classes.face())});  // 2.5 s
     EXPECT_TRUE(visibleIds(tracker).empty()) << "hidden after 2 s of weak detections only";
-    for (int f = 0; f < 3; ++f) step(tracker, {det(300, 300, classes.hand())});
+    for (int f = 0; f < 3; ++f) step(tracker, {det(300, 300, classes.face())});
     EXPECT_EQ(seen_.size(), 1u) << "a confident detection brings back the same track";
 }
 
@@ -238,13 +237,12 @@ TEST_F(TrackerTest, CrossingObjectsKeepTheirIds) {
 TEST_F(TrackerTest, NumbersCountPerClassFromOne) {
     Tracker tracker(classes);
     for (int f = 0; f < 5; ++f)
-        step(tracker, {det(100, 100, classes.hand()), det(400, 100, classes.hand()),
-                       det(250, 300, classes.face()), det(600, 400, kPerson)});
+        step(tracker, {det(100, 100, classes.face()), det(400, 100, classes.face()),
+                       det(600, 400, kPerson)});
     std::map<ClassId, std::set<int>> numbers;
     for (const Track& t : tracker.tracks())
         if (isVisible(t)) numbers[t.classId].insert(t.number);
-    EXPECT_EQ(numbers[classes.hand()], (std::set<int>{1, 2}));
-    EXPECT_EQ(numbers[classes.face()], (std::set<int>{1}));
+    EXPECT_EQ(numbers[classes.face()], (std::set<int>{1, 2}));
     EXPECT_EQ(numbers[kPerson], (std::set<int>{1}));
 }
 
@@ -287,27 +285,28 @@ TEST_F(TrackerTest, BriefDropOutIsNotDrawnAsAPrediction) {
 // one that has been gone for a while. A confident detection does.
 TEST_F(TrackerTest, WeakDetectionsDontReviveALostTrack) {
     Tracker tracker(classes);
-    for (int f = 0; f < 10; ++f) step(tracker, {det(300, 300, classes.hand())});
+    for (int f = 0; f < 10; ++f) step(tracker, {det(300, 300, classes.face())});
     for (int f = 0; f < 30; ++f) step(tracker, {});  // 1 s
-    for (int f = 0; f < 5; ++f) step(tracker, {weakDet(300, 300, classes.hand())});
+    for (int f = 0; f < 5; ++f) step(tracker, {weakDet(300, 300, classes.face())});
     EXPECT_TRUE(visibleIds(tracker).empty());
-    step(tracker, {det(300, 300, classes.hand())});
+    step(tracker, {det(300, 300, classes.face())});
     EXPECT_EQ(visibleIds(tracker).size(), 1u);
     EXPECT_EQ(seen_.size(), 1u) << "same track as before";
 }
 
-// A waved hand: the shown box stays on the hand instead of trailing behind it.
-TEST_F(TrackerTest, WavedHandBoxKeepsUp) {
+// Fast back-and-forth motion: the shown box stays on the object instead of
+// trailing behind it.
+TEST_F(TrackerTest, FastBackAndForthBoxKeepsUp) {
     Tracker tracker(classes);
     double error = 0;
     int frames = 0;
-    for (int f = 0; f < 90; ++f) {  // 3 s, waving twice a second, 150 px each way
+    for (int f = 0; f < 90; ++f) {  // 3 s, twice a second, 150 px each way
         const float x = 500 + 150 * std::sin(2 * static_cast<float>(CV_PI) * 2 * f * kFrame);
-        step(tracker, {det(x, 300, classes.hand(), 120)});
+        step(tracker, {det(x, 300, classes.face(), 120)});
         if (f < 10) continue;
         ASSERT_EQ(visibleIds(tracker).size(), 1u);
         error += std::abs(tracker.tracks().front().box.x - x);
         ++frames;
     }
-    EXPECT_LT(error / frames, 6.0) << "mean px behind a 120 px hand";
+    EXPECT_LT(error / frames, 6.0) << "mean px behind a 120 px face";
 }

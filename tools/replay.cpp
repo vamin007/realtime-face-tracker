@@ -92,7 +92,7 @@ bool setParam(TrackerParams& p, const std::string& assignment) {
         {"weakBridge", [&](double x) { p.weakBridge = x; }},
         {"weakTimeout", [&](double x) { p.weakTimeout = x; }},
         {"weakReacquire", [&](double x) { p.weakReacquire = x; }},
-        {"weakBridgeFaceHand", [&](double x) { p.weakBridgeFaceHand = x; }},
+        {"weakBridgeFace", [&](double x) { p.weakBridgeFace = x; }},
         {"velocityHalfLife", [&](double x) { p.velocityHalfLife = x; }},
         {"minIou", [&](double x) { p.minIou = static_cast<float>(x); }},
         {"maxDistance", [&](double x) { p.maxDistance = static_cast<float>(x); }},
@@ -222,8 +222,8 @@ struct Steadiness {
             trailMs.push_back(1000 * (off.x * v.x + off.y * v.y) / (speed * speed));
         }
     }
-    // Moving at least this many box sizes per second counts as fast (a waved
-    // hand); detection noise alone stays well below it.
+    // Moving at least this many box sizes per second counts as fast (a head
+    // turned quickly); detection noise alone stays well below it.
     static constexpr double kFastSizesPerSecond = 4.0;
     // Moving less than this: wobble shows (jitter while slow).
     static constexpr double kSlowSizesPerSecond = 1.0;

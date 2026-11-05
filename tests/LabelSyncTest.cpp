@@ -712,8 +712,8 @@ TEST_F(LabelSync, LabelsFromTheOldFormatAreConvertedAndKeepTheirEmbeddings) {
 // recorded as showing no face, for good. The other detectors don't matter.
 TEST(SyncDetectors, ASyncNeedsOnlyTheFaceDetector) {
     EXPECT_TRUE(missingForSync({"face"}).empty());
-    EXPECT_TRUE(missingForSync({"hand", "face", "yolo"}).empty());
-    EXPECT_EQ(missingForSync({"yolo", "hand"}), std::vector<std::string>{"face"});
+    EXPECT_TRUE(missingForSync({"face", "yolo"}).empty());
+    EXPECT_EQ(missingForSync({"yolo"}), std::vector<std::string>{"face"});
     EXPECT_EQ(missingForSync({}), std::vector<std::string>{"face"});
 }
 

@@ -25,7 +25,7 @@ TEST(Options, Defaults) {
 }
 
 TEST(Options, NumbersAreChecked) {
-    EXPECT_FLOAT_EQ(parse({"--conf-hand", "0.5"}).confHand, 0.5f);
+    EXPECT_FLOAT_EQ(parse({"--conf-face", "0.5"}).confFace, 0.5f);
     EXPECT_THROW(parse({"--conf", "abc"}), std::runtime_error);
     EXPECT_THROW(parse({"--conf", "1.5"}), std::runtime_error);
     EXPECT_THROW(parse({"--conf", "0.5x"}), std::runtime_error);
@@ -33,7 +33,6 @@ TEST(Options, NumbersAreChecked) {
     const Options all = parse({"--conf", "0.3"});
     EXPECT_FLOAT_EQ(all.confYolo, 0.3f);
     EXPECT_FLOAT_EQ(all.confFace, 0.3f);
-    EXPECT_FLOAT_EQ(all.confHand, 0.3f);
 }
 
 TEST(Options, ErrorMessagesSayWhatWasExpected) {
@@ -86,4 +85,11 @@ TEST(Options, MisuseIsRejected) {
     EXPECT_THROW(parse({"--no-window"}), std::runtime_error);  // camera with no way to stop
     EXPECT_NO_THROW(parse({"--no-window", "--video", "clip.mov"}));
     EXPECT_THROW(parse({"--backend", "gpu"}), std::runtime_error);
+}
+
+// Hands aren't detected: their options are gone.
+TEST(Options, HandOptionsAreGone) {
+    EXPECT_THROW(parse({"--no-hands"}), std::runtime_error);
+    EXPECT_THROW(parse({"--conf-hand", "0.5"}), std::runtime_error);
+    EXPECT_THROW(parse({"--hand-model", "palm.onnx"}), std::runtime_error);
 }

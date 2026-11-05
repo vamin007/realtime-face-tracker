@@ -46,7 +46,7 @@ private:
 // false for any other key.
 bool applyViewKey(int key, DrawOptions& options);
 
-// Visible tracks per class, sorted by name: {"face", 1}, {"hand", 2}.
+// Visible tracks per class, sorted by name: {"face", 1}, {"person", 2}.
 std::vector<std::pair<std::string, int>> countByClass(const std::vector<Track>& tracks,
                                                       const ClassRegistry& classes);
 
