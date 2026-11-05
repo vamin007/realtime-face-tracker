@@ -27,6 +27,7 @@ add_library(tracker_core STATIC
     src/Tracker.cpp
     src/Targeting.cpp
     src/Embedder.cpp
+    src/FaceNet.cpp
     src/Labels.cpp
     src/Recognizer.cpp
     src/Enrollment.cpp
@@ -63,6 +64,7 @@ if(GTest_FOUND)
         tests/ClassRegistryTest.cpp
         tests/DetectorTest.cpp
         tests/EmbedderTest.cpp
+        tests/FaceNetTest.cpp
         tests/KalmanBoxTest.cpp
         tests/LabelsTest.cpp
         tests/LabelSyncTest.cpp
