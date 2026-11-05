@@ -75,6 +75,13 @@ TEST(Options, LabelCommands) {
     EXPECT_THROW(parse({"--rename-label", "alex"}), std::runtime_error);  // no new name
 }
 
+TEST(Options, AutoPhotosAreOnUnlessTurnedOff) {
+    EXPECT_TRUE(parse({}).autoPhotos);
+    const Options opt = parse({"--no-auto-photos"});
+    EXPECT_FALSE(opt.autoPhotos);
+    EXPECT_TRUE(opt.labels) << "recognition stays on";
+}
+
 TEST(Options, ModelFlagsMarkTheModelAsRequired) {
     const Options opt = parse({"--model", "other.onnx"});
     EXPECT_EQ(opt.yoloModel.path, "other.onnx");
