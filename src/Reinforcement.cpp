@@ -95,7 +95,7 @@ float sharpness(const cv::Mat& image, const cv::Rect2f& face) {
     cv::resize(gray, small, {112, 112}, 0, 0, cv::INTER_AREA);
     cv::Laplacian(small, laplacian, CV_32F);
     cv::Scalar mean, deviation;
-    cv::meanStdDev(laplacian, mean, deviation);
+    cv::meanStdDev(laplacian(cv::Rect(22, 22, 68, 68)), mean, deviation);  // the middle 60%
     return static_cast<float>(deviation[0] * deviation[0]);
 }
 

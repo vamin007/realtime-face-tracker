@@ -30,7 +30,7 @@ struct CaptureParams {
     float scoreLead = 0.05f;      // the label's score is at least this above its threshold
     float minMargin = 0.1f;       // ... and this above the runner-up's
     float minWidth = 80;          // px: the face's width in the frame
-    float minSharpness = 30;      // variance of the Laplacian of the face at 112 px (see sharpness)
+    float minSharpness = 15;      // see sharpness()
     float maxSimilarity = 0.85f;  // to any of the label's samples: it must be a new view
     double interval = 30;         // s between photos of one label
     int maxPhotos = 40;           // automatic photos per label; then the most redundant goes
@@ -69,8 +69,12 @@ enum class CaptureGate {
 CaptureGate capturePolicy(const CaptureInput& in, const CaptureParams& params = {});
 const char* describe(CaptureGate gate);  // "taken", "too soon", ...
 
-// How sharp a face is: the variance of the Laplacian of its box, in gray,
-// scaled to 112 x 112 (the size the face is embedded at). 0 outside the image.
+// How sharp a face is: the variance of the Laplacian over the middle 60% of
+// its box (eyes, nose and mouth; hair and background left out), in gray, with
+// the box scaled to 112 x 112 (the size a face is embedded at). 0 outside the
+// image. On hands_face.mov, clear faces measured 19-200 (median 71), a hand
+// sweeping across the face 9.5; over the whole box that hand measured 45, among
+// clear but smooth faces (35-48), hence the middle only. 15 is the threshold.
 float sharpness(const cv::Mat& image, const cv::Rect2f& face);
 // The highest similarity of e to any of the label's samples.
 float maxSimilarity(const CustomLabel& label, const Embedding& e);
