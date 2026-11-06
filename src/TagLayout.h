@@ -1,3 +1,8 @@
+// Tag placement for the overlay. A tag is the small plate with an object's name ("face #2",
+// "TARGET"). Drawing each at a fixed spot would make tags cover each other and the boxes in a
+// crowd, so this class picks a spot for every tag each frame: greedily, in priority order, from a
+// fixed list of candidate positions around the box, avoiding tags already placed and reserved
+// areas. It remembers the previous frame's choices so tags don't jump around.
 #pragma once
 #include <map>
 #include <opencv2/core.hpp>
@@ -20,10 +25,15 @@ public:
 
     // Call once per frame. Items earlier in the list get the better spots.
     // Returns one rect per item, in the same order.
+    // frame: the frame's size in pixels; spots are moved to lie inside it. reserved: rects tags
+    // should stay off (the HUD panel, the "TARGET LOCKED" badge). When no spot is free, the
+    // one that overlaps the least is used, so a tag is always placed.
     std::vector<cv::Rect> place(const std::vector<Item>& items, cv::Size frame,
                                 const std::vector<cv::Rect>& reserved = {});
 
 private:
+    // What was chosen for an item last frame (its spot and how many frames in a row it has been
+    // there), kept so its tag doesn't hop around.
     struct Placed {
         int spot;    // index into the candidate spots, best first
         int frames;  // frames it has been there

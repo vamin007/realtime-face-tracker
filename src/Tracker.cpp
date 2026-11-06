@@ -1,3 +1,6 @@
+// Tracker implementation: the per-frame update() pipeline (predict, two-stage matching, new
+// tracks, timeouts, visibility) and the cost function that decides which detections may continue
+// which tracks. See Tracker.h for the overview and what each parameter means.
 #include "Tracker.h"
 
 #include <algorithm>
@@ -7,6 +10,7 @@
 
 namespace {
 
+// Intersection over union: overlap area / combined area, from 0 (disjoint) to 1 (identical).
 float iou(const cv::Rect2f& a, const cv::Rect2f& b) {
     const float inter = (a & b).area();
     const float uni = a.area() + b.area() - inter;
@@ -15,11 +19,15 @@ float iou(const cv::Rect2f& a, const cv::Rect2f& b) {
 
 cv::Point2f center(const cv::Rect2f& r) { return {r.x + r.width / 2, r.y + r.height / 2}; }
 
+// A box's scale: the side of a square with the same area. Distances are measured in these units
+// so a small and a large object are matched alike.
 float sizeOf(const cv::Rect2f& r) { return std::sqrt(std::max(r.area(), 1.0f)); }
 
-// Weight of the center distance next to (1 - IoU) in a pair's cost.
+// Weight of the center distance next to (1 - IoU) in a pair's cost. Without the distance term,
+// all pairs that don't overlap would cost the same (1), so it also ranks those.
 constexpr float kDistanceWeight = 0.5f;
-// Smoothing of the displayed confidence (weight of the newest detection).
+// Smoothing of the displayed confidence (an exponential moving average; the weight of the
+// newest detection).
 constexpr float kConfSmoothing = 0.4f;
 // Smoothing of a track's typical size; a person's box changes a lot with their pose.
 constexpr float kSizeSmoothing = 0.3f;
@@ -47,6 +55,9 @@ bool Tracker::touchesEdge(const cv::Rect2f& box) const {
 }
 
 // Cost of pairing track t with detection d (lower is better), or -1 if they can't match.
+// The -1 gates keep implausible pairs out of the Hungarian assignment altogether: a different
+// class, a very different size, or too far away. weak selects the stricter rules for weak
+// detections. now is the frame time in seconds.
 float Tracker::pairCost(const Track& t, const Detection& d, double now, bool weak) const {
     if (t.classId != d.classId) return -1;
     // Sizes: the track's typical size (not shrunk by the frame edge) and the detection's.
@@ -58,6 +69,7 @@ float Tracker::pairCost(const Track& t, const Detection& d, double now, bool wea
     // leaving): the edge can make a box smaller, never bigger.
     if (ratio * params_.maxSizeRatio < 1 && (weak || !touchesEdge(d.box))) return -1;
 
+    // How well the boxes fit: overlap, and center distance in units of object size.
     const float overlap = iou(t.box, d.box);
     const cv::Point2f offset = center(t.box) - center(d.box);
     const float distance = std::hypot(offset.x, offset.y) / std::sqrt(trackSize * detSize);
@@ -65,15 +77,21 @@ float Tracker::pairCost(const Track& t, const Detection& d, double now, bool wea
         // Weak detections are often noise, so they must overlap the track itself.
         if (overlap < params_.weakMinIou) return -1;
     } else {
-        // The longer a track has been unseen, the further away it may turn up.
+        // The longer a track has been unseen, the further away it may turn up (its box is only
+        // a prediction by then). A pair that overlaps at least minIou passes regardless.
         const float unseen = static_cast<float>(std::max(0.0, now - t.lastSeen));
         const float limit = std::min(params_.maxLostDistance,
                                      params_.maxDistance + params_.lostSearchGrowth * unseen);
         if (overlap < params_.minIou && distance > limit) return -1;
     }
+    // 0 for identical boxes; grows as the overlap shrinks and the centers move apart.
     return (1 - overlap) + kDistanceWeight * distance;
 }
 
+// One matching stage: pairs the given tracks (indices into tracks_) with the given detections
+// (indices into detections) so that the total pair cost is lowest, and applies the matches.
+// detUsed is shared by all stages: it marks the detections that got a track, so later stages and
+// the new-track step skip them. Tracks left without a plausible detection stay unmatched.
 void Tracker::match(const std::vector<size_t>& trackIdx, const std::vector<size_t>& detIdx,
                     const std::vector<Detection>& detections, double now, bool weak,
                     std::vector<bool>& detUsed) {
@@ -83,6 +101,7 @@ void Tracker::match(const std::vector<size_t>& trackIdx, const std::vector<size_
         for (size_t c = 0; c < detIdx.size(); ++c)
             cost[r][c] = pairCost(tracks_[trackIdx[r]], detections[detIdx[c]], now, weak);
 
+    // pick[r]: the column (detection) chosen for row r (track), or -1 for none.
     const std::vector<int> pick = assign(cost);
     for (size_t r = 0; r < trackIdx.size(); ++r) {
         if (pick[r] < 0) continue;
@@ -92,12 +111,17 @@ void Tracker::match(const std::vector<size_t>& trackIdx, const std::vector<size_
     }
 }
 
+// Folds a matched detection into its track: Kalman correction, smoothed confidence and size,
+// timestamps, and confirmation once it has enough hits.
 void Tracker::applyMatch(Track& t, const Detection& d, double now) {
     t.atEdge = touchesEdge(d.box);
+    // Kalman correct: blend the detection into the predicted state. A weak detection counts as
+    // noisier, so it moves the box less.
     t.kf.correct(d.box, d.weak ? params_.weakNoise : 1.0f);
     // A box cut off by the edge shrinks as the object leaves; that isn't the
     // object getting smaller, so don't let it set a shrinking trend.
     if (t.atEdge) t.kf.stopResizing();
+    // The shown box is the filtered one, not the raw detection.
     t.box = inFrame(t.kf.box());
     t.conf = (1 - kConfSmoothing) * t.conf + kConfSmoothing * d.conf;
     t.lastSeen = now;
@@ -105,6 +129,7 @@ void Tracker::applyMatch(Track& t, const Detection& d, double now) {
     t.matched = true;
     t.detected = d.box;
     t.keypoints = d.keypoints;
+    // A box cut off by the frame edge would drag the typical size down.
     if (!t.atEdge) t.refSize = (1 - kSizeSmoothing) * t.refSize + kSizeSmoothing * sizeOf(d.box);
     ++t.hits;
     if (!t.confirmed && t.hits >= params_.minHits) confirm(t);
@@ -112,6 +137,8 @@ void Tracker::applyMatch(Track& t, const Detection& d, double now) {
     if (t.trail.size() > params_.trailLength) t.trail.pop_front();
 }
 
+// Starts a tentative track from a confident detection. Its filter begins at the detection's box
+// with zero velocity and a wide velocity uncertainty (one box says nothing about speed).
 Track Tracker::createTrack(const Detection& d, double now) {
     Track t;
     t.id = nextId_++;
@@ -140,8 +167,10 @@ void Tracker::confirm(Track& t) {
 }
 
 void Tracker::update(const std::vector<Detection>& detections, double now) {
-    // 1. Advance every track to now. A track that went unseen last frame slows
-    //    down, so it waits near where it was lost instead of drifting off.
+    // 1. Advance every track to now (Kalman predict: move the state by velocity * dt and widen
+    //    its uncertainty). A track that went unseen last frame slows down, so it waits near
+    //    where it was lost instead of drifting off. Here t.matched is still last frame's
+    //    result; it is cleared below for this frame's matching.
     for (Track& t : tracks_) {
         const double dt = now - t.kfTime;
         if (!t.matched && dt > 0)
@@ -152,6 +181,7 @@ void Tracker::update(const std::vector<Detection>& detections, double now) {
         t.matched = false;
     }
 
+    // Split into confident and weak detections (indices into detections).
     std::vector<size_t> strong, weak;
     for (size_t i = 0; i < detections.size(); ++i)
         (detections[i].weak ? weak : strong).push_back(i);
@@ -169,7 +199,8 @@ void Tracker::update(const std::vector<Detection>& detections, double now) {
         return out;
     };
 
-    // 2. Confident detections against confirmed tracks, including recently lost ones.
+    // 2. Confident detections against confirmed tracks, including recently lost ones. Confirmed
+    //    tracks pick first, so a tentative track can't take a detection from an established one.
     match(tracksWhere([](const Track& t) { return t.confirmed; }), strong, detections, now, false,
           detUsed);
     // 3. Weak detections keep the remaining confirmed tracks going (never start new
@@ -184,7 +215,8 @@ void Tracker::update(const std::vector<Detection>& detections, double now) {
           false, detUsed);
 
     // 5. Confident detections still unmatched start new tracks, unless they
-    //    duplicate a track that was just matched (two boxes on one object).
+    //    duplicate a track that was just matched (two boxes on one object): IoU above
+    //    duplicateIou with a same-class track matched or created earlier in this frame.
     for (size_t i : unused(strong)) {
         const Detection& d = detections[i];
         const bool duplicate = std::any_of(tracks_.begin(), tracks_.end(), [&](const Track& t) {
@@ -194,7 +226,9 @@ void Tracker::update(const std::vector<Detection>& detections, double now) {
     }
 
     // 6. Drop tracks missing too long, or kept going by weak detections alone for
-    //    too long, and show confirmed ones while recently seen.
+    //    too long, and show confirmed ones while recently seen. The timeout is short for a
+    //    track that never got confirmed, and longer for one last seen at the frame edge, which
+    //    may have walked out of view and come back where it left.
     tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(),
                                  [&](const Track& t) {
                                      const double timeout = !t.confirmed ? params_.tentativeTimeout

@@ -1,3 +1,5 @@
+// Tests for assign() (the Hungarian algorithm): a lowest total cost beats greedy matching,
+// matrices with more rows or more columns, forbidden (negative-cost) pairs, and empty inputs.
 #include <gtest/gtest.h>
 
 #include "Assignment.h"
@@ -9,16 +11,19 @@ TEST(Assignment, PicksTheLowestTotalCost) {
     EXPECT_EQ(assign(cost), (std::vector<int>{1, 0}));
 }
 
+// Three rows compete for one column: the cheapest row gets it, the others stay unassigned (-1).
 TEST(Assignment, MoreRowsThanColumns) {
     const std::vector<std::vector<float>> cost = {{5}, {1}, {3}};
     EXPECT_EQ(assign(cost), (std::vector<int>{-1, 0, -1}));
 }
 
+// One row takes its cheapest column.
 TEST(Assignment, MoreColumnsThanRows) {
     const std::vector<std::vector<float>> cost = {{4, 1, 3}};
     EXPECT_EQ(assign(cost), (std::vector<int>{1}));
 }
 
+// A negative cost means "not allowed": row 0 has no allowed pair, so it stays unassigned.
 TEST(Assignment, ForbiddenPairsStayUnassigned) {
     const std::vector<std::vector<float>> cost = {{-1, -1}, {0.5f, -1}};
     EXPECT_EQ(assign(cost), (std::vector<int>{-1, 0}));

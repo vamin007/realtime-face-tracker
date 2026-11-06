@@ -1,3 +1,9 @@
+// Tests for laser targeting: the face oval built from landmarks (FaceOval), the per-frame dot
+// search (LaserDot) and the timing that turns it into a target (TargetingTest). The frames are
+// synthetic. A Scene draws skin-colored heads (with hair and red lips) on a room background and
+// adds laser dots as light, the way a camera records them, and red marks as pigment. That lets
+// the tests say what must count as a dot (cheek, forehead, nose; dim, bright or dark skin) and
+// what must not (wall, hair, lips, red stickers, flashlights).
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -21,6 +27,7 @@ const cv::Scalar kWall(150, 170, 205);        // a beige wall: as close to the s
 const cv::Vec3f kRedMark(0.35f, 0.30f, 1.25f), kFluorescentMark(0.35f, 0.30f, 1.6f),
     kPinkSpot(1.0f, 1.0f, 1.3f);
 
+// Conversions between 8-bit values and linear light (gamma 2.2), the space where light adds up.
 float toLinear(int v) { return std::pow(v / 255.0f, 2.2f); }
 uchar fromLinear(float v) {
     return cv::saturate_cast<uchar>(255 * std::pow(std::min(std::max(v, 0.0f), 1.0f), 1 / 2.2f));
@@ -121,6 +128,7 @@ std::vector<cv::Point2f> landmarksAt(const cv::Rect2f& box) {
 const std::vector<cv::Point2f> kCoveredLandmarks = {
     {640, 250}, {648, 300}, {650, 340}, {640, 420}, {645, 425}};
 
+// Renders the scene and searches kFaceBox for a dot, with the oval built from the landmarks.
 LaserDot find(const Scene& scene, const std::vector<cv::Point2f>& landmarks = kLandmarks) {
     return findLaserDot(scene.render(), faceOval(kFaceBox, landmarks), kFaceBox);
 }
@@ -161,6 +169,8 @@ TEST(FaceOval, FollowsTheLandmarksFromForeheadToChin) {
     }
 }
 
+// 20 px of drop over 80 px between the eyes tilts the oval by atan(20 / 80), about 14 degrees,
+// and swapping the landmark order (a mirrored image) gives the same angle.
 TEST(FaceOval, TiltsWithTheEyesWhetherOrNotTheImageIsMirrored) {
     std::vector<cv::Point2f> tilted = kLandmarks;
     tilted[1].y += 20;  // head tilted
@@ -170,6 +180,7 @@ TEST(FaceOval, TiltsWithTheEyesWhetherOrNotTheImageIsMirrored) {
     EXPECT_NEAR(faceOval(kFaceBox, tilted).angle, 14.0, 0.5);
 }
 
+// The fallback: an oval inside the middle of the box.
 TEST(FaceOval, WithoutLandmarksItIsInsideTheBox) {
     const cv::RotatedRect oval = faceOval(kFaceBox, {});
     EXPECT_NEAR(oval.center.x, 640, 1);
@@ -191,6 +202,8 @@ TEST(FaceOval, LandmarksNotShapedLikeAFaceAreIgnored) {
     }
 }
 
+// The basic case: a dot on the cheek is found where it is, with a clear red rise, a glow and a
+// ring of skin around it.
 TEST(LaserDot, ADotOnTheCheekIsFound) {
     Scene scene;
     scene.dots = {{685, 345}};
@@ -203,6 +216,7 @@ TEST(LaserDot, ADotOnTheCheekIsFound) {
     EXPECT_GT(dot.skinAround, 0.9f);
 }
 
+// Other places on the face (the third spot is near the chin).
 TEST(LaserDot, ADotOnTheForeheadNoseOrChinIsFound) {
     for (const cv::Point p : {cv::Point(640, 275), cv::Point(640, 330), cv::Point(640, 412)}) {
         Scene scene;
@@ -239,6 +253,8 @@ TEST(LaserDot, ADotOnBrightlyLitSkinIsFound) {
     EXPECT_TRUE(find(scene).found) << "very bright skin";
 }
 
+// With no dot, nothing is found whatever the lighting: red lips alone, a flashlight, an
+// overexposed face, or warm lamp light on very red skin.
 TEST(LaserDot, NoDotNoMatterHowTheFaceIsLit) {
     Scene scene;  // red lips only
     EXPECT_FALSE(find(scene).found);
@@ -283,6 +299,7 @@ TEST(LaserDot, OnVeryBrightSkinLitLipsAreNotADot) {
     EXPECT_FALSE(find(scene).found);
 }
 
+// Dark skin leaves plenty of room for the red to rise. sigma is the spot's width in pixels.
 TEST(LaserDot, WorksOnDarkSkinAndForSmallOrLargeDots) {
     Scene scene;
     scene.faces[0].skin = cv::Scalar(55, 75, 105);
@@ -321,6 +338,8 @@ TEST(LaserDot, ADotOutsideTheBoxNeverCounts) {
     EXPECT_FALSE(findLaserDot(frame, sliver, kFaceBox).found);
 }
 
+// With the landmarks of a covered face the oval falls back to the box: a dot on the cheek still
+// counts, a dot on the wall beside the face doesn't.
 TEST(LaserDot, LandmarksGoneAstrayFallBackToTheBox) {
     Scene scene;
     scene.patches = {{cv::Rect2f(745, 250, 150, 170), kWall}};
@@ -330,6 +349,8 @@ TEST(LaserDot, LandmarksGoneAstrayFallBackToTheBox) {
     EXPECT_FALSE(find(scene, kCoveredLandmarks).found) << "the wall beside the face";
 }
 
+// A box that starts left of the frame: the search area is cut to the frame, and a dot at the
+// very edge doesn't crash anything.
 TEST(LaserDot, AFacePartlyOutsideTheFrame) {
     const cv::Rect2f box(-60, 200, 200, 260);
     Scene scene;
@@ -362,6 +383,7 @@ TEST_F(TargetingTest, ALaserOnAFaceMakesItTheTarget) {
     EXPECT_FALSE(selector.target().active());
 }
 
+// The same on skin with little room left for the red to rise.
 TEST_F(TargetingTest, ALaserOnABrightlyLitFaceMakesItTheTarget) {
     TargetSelector selector(classes);
     const std::vector<Track> tracks = {makeTrack(1, classes.face(), kFaceBox, kLandmarks)};
@@ -373,6 +395,8 @@ TEST_F(TargetingTest, ALaserOnABrightlyLitFaceMakesItTheTarget) {
     EXPECT_TRUE(selector.target().active());
 }
 
+// A dot that appears for one frame at a time never lasts enterTime, so it never becomes the
+// target.
 TEST_F(TargetingTest, AFlashOfTheDotIsNotEnough) {
     TargetSelector selector(classes);
     const std::vector<Track> tracks = {makeTrack(1, classes.face(), kFaceBox, kLandmarks)};
@@ -415,6 +439,8 @@ TEST_F(TargetingTest, TheTargetRidesOutAShortDetectionGap) {
     EXPECT_FALSE(selector.target().active());
 }
 
+// If the face is not detected at all, the target is kept for coastTime (0.75 s, 22 of the 30
+// frames) and then released.
 TEST_F(TargetingTest, TheTargetIsReleasedWhenItsFaceStaysUndetected) {
     TargetSelector selector(classes);
     std::vector<Track> tracks = {makeTrack(1, classes.face(), kFaceBox, kLandmarks)};
@@ -426,6 +452,7 @@ TEST_F(TargetingTest, TheTargetIsReleasedWhenItsFaceStaysUndetected) {
     EXPECT_FALSE(selector.target().active());
 }
 
+// The face suddenly gets much brighter (a flashlight): no dot, so no target.
 TEST_F(TargetingTest, AFlashlightIsNotALaser) {
     TargetSelector selector(classes);
     const std::vector<Track> tracks = {makeTrack(1, classes.face(), kFaceBox, kLandmarks)};
@@ -454,6 +481,7 @@ TEST_F(TargetingTest, ALaserBesideTheHeadIsNotATarget) {
     EXPECT_EQ(run(selector, scene, tracks, 60), 0);
 }
 
+// A dot on a person track (not a face) never counts.
 TEST_F(TargetingTest, OnlyFacesCanBeTargets) {
     TargetSelector selector(classes);
     const cv::Rect2f personBox(900, 150, 300, 550);
@@ -465,6 +493,7 @@ TEST_F(TargetingTest, OnlyFacesCanBeTargets) {
     EXPECT_EQ(run(selector, scene, tracks, 60), 0);
 }
 
+// When the dot moves to another face, that face becomes the target.
 TEST_F(TargetingTest, TheTargetFollowsTheLaserToAnotherFace) {
     TargetSelector selector(classes);
     const cv::Rect2f otherBox(100, 200, 200, 260);
@@ -480,6 +509,8 @@ TEST_F(TargetingTest, TheTargetFollowsTheLaserToAnotherFace) {
     EXPECT_EQ(selector.target().trackId, 2);
 }
 
+// No flip-flopping: while the dot is still on the current target, a second dot on another face
+// doesn't take over.
 TEST_F(TargetingTest, WithADotOnTwoFacesTheTargetStays) {
     TargetSelector selector(classes);
     const cv::Rect2f otherBox(100, 200, 200, 260);

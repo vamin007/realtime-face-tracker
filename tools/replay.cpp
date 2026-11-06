@@ -19,6 +19,17 @@
 //            overall and while the object moves fast, and how far behind the
 //            object it trails then (ms); while it isn't detected (coast), how far
 //            the box is from the straight path between the detections around it.
+//
+// How it works: `tracker --dump-detections` saves every raw detection (class, confidence, weak
+// flag, box, landmarks) of every frame, with the frame's time. This tool feeds them to a Tracker
+// frame by frame at those same times, so the tracks are what the live program would have made
+// with these settings, minus the slow neural networks (the frame size is fixed at 1280x720, the
+// reference clips). The same detections and settings always give the same tracks, which also
+// makes it a regression check for tracker changes.
+//
+// Reading the numbers: jitter and size changes are wobble that makes boxes look unsteady; lag
+// is how far the shown box is from where the detector put the object. Smoothing trades one
+// against the other, so both tables are printed together.
 
 #include <algorithm>
 #include <cmath>
@@ -37,11 +48,15 @@
 
 namespace {
 
+// One video frame: its time and the detections the detectors produced for it.
 struct Frame {
     double timeMs = 0;
     std::vector<Detection> detections;
 };
 
+// Reads a CSV written by `tracker --dump-detections`: one row per detection with the columns
+// frame,t_ms,class,conf,weak,x,y,w,h,keypoints (box and keypoints in frame pixels; keypoints a
+// space-separated list of x y pairs). Returns one entry per frame, frame 0 first.
 std::vector<Frame> readDetections(const std::string& path, const ClassRegistry& classes) {
     std::ifstream in(path);
     if (!in) throw std::runtime_error("Can't open " + path);
@@ -57,6 +72,8 @@ std::vector<Frame> readDetections(const std::string& path, const ClassRegistry& 
         const size_t frame = std::stoul(f[0]);
         if (frame >= frames.size()) frames.resize(frame + 1);
         frames[frame].timeMs = std::stod(f[1]);
+        // The average frame interval so far (assumes frame 0 is at time 0), used below
+        // for the frames that have no rows.
         if (frame > 0) msPerFrame = frames[frame].timeMs / frame;
         Detection d;
         d.classId = classes.find(f[2]);
@@ -76,11 +93,15 @@ std::vector<Frame> readDetections(const std::string& path, const ClassRegistry& 
     return frames;
 }
 
+// Applies one `name=value` override. Returns false if the text isn't of that form or the name
+// isn't one of the known settings (TrackerParams and KalmanBox::Params field names).
 bool setParam(TrackerParams& p, const std::string& assignment) {
     const auto eq = assignment.find('=');
     if (eq == std::string::npos) return false;
     const std::string name = assignment.substr(0, eq);
     const double v = std::stod(assignment.substr(eq + 1));
+    // Name -> setter. A parameter that is not listed here cannot be overridden from the command
+    // line.
     const std::map<std::string, std::function<void(double)>> setters = {
         {"minHits", [&](double x) { p.minHits = static_cast<int>(x); }},
         {"tentativeTimeout", [&](double x) { p.tentativeTimeout = x; }},
@@ -120,6 +141,8 @@ struct Sample {
     size_t frame;
     double time;  // s
     bool matched, coasting;
+    // box: the shown (filtered) box. detected: the box of the last matched detection, which is
+    // this frame's when matched is set.
     cv::Rect2f box, detected;
     int number;
 };
@@ -127,12 +150,14 @@ struct Sample {
 cv::Point2f centerOf(const cv::Rect2f& r) { return {r.x + r.width / 2, r.y + r.height / 2}; }
 float sizeOf(const cv::Rect2f& r) { return std::sqrt(std::max(r.area(), 1.0f)); }
 
+// The p-th percentile (p in 0..100) of v by rank, without interpolation; NaN if v is empty.
 double percentile(std::vector<double> v, double p) {
     if (v.empty()) return NAN;
     std::sort(v.begin(), v.end());
     return v[std::min(v.size() - 1, static_cast<size_t>(p / 100 * v.size()))];
 }
 
+// The mean of v; NaN if v is empty.
 double mean(const std::vector<double>& v) {
     double sum = 0;
     for (double x : v) sum += x;
@@ -141,6 +166,8 @@ double mean(const std::vector<double>& v) {
 
 // Flicker and lag of one class's tracks (see the top of the file).
 struct Steadiness {
+    // Event counts for the whole clip: gaps = a shown box vanished and came back; thin = it
+    // switched to a thin predicted box; numberChanges = its on-screen number changed.
     long long gaps = 0, thin = 0, numberChanges = 0;
     std::vector<double> jitter;              // % of box size
     std::vector<double> slowJitter;          // ... while the box moves slowly (visible as wobble)
@@ -151,9 +178,12 @@ struct Steadiness {
     std::vector<double> coastError;          // predicted box vs the object's path, % of box size
     std::vector<double> ghostMs;  // shown after the last detection, before a long absence
 
-    // Shown boxes after the last detection, before the track disappears for a while.
+    // Shown boxes after the last detection, before the track disappears for a while. A box that
+    // lingers after its object is gone is a "ghost": it shows how long the tracker keeps a box up
+    // when no detection supports it.
     void addGhosts(const std::vector<Sample>& s) {
         for (size_t i = 0; i < s.size(); ++i) {
+            // Sample i is the last before an absence of over a second (or before the clip ends).
             const bool gone = i + 1 == s.size() || s[i + 1].time - s[i].time > 1.0;
             if (!gone) continue;
             size_t last = i;  // the last frame with a detection
@@ -162,10 +192,12 @@ struct Steadiness {
         }
     }
 
+    // s: the samples (frames) of one visible track, in order. Adds this track's measurements.
     void add(const std::vector<Sample>& s) {
         addGhosts(s);
         // A run of predicted boxes between two detections: the object moved
-        // roughly in a straight line from one detection to the next.
+        // roughly in a straight line from one detection to the next. Each predicted center is
+        // compared with the point on that line at the same time (w is how far along it is).
         for (size_t i = 0; i + 1 < s.size(); ++i) {
             if (!s[i].matched) continue;
             size_t j = i + 1;
@@ -182,11 +214,16 @@ struct Steadiness {
             i = j - 1;
         }
         for (size_t i = 1; i < s.size(); ++i) {
+            // Frame-to-frame measures. jitter is the second difference of the box center,
+            // c[i] - 2 c[i-1] + c[i-2]: zero for steady motion, so it measures wobble, not
+            // movement. The "slow" variants count only moments when the box moves less than one
+            // box size per second, where any wobble is plainly visible.
             numberChanges += s[i].number != s[i - 1].number;
             if (s[i].frame != s[i - 1].frame + 1) {
                 ++gaps;
                 continue;
             }
+            // thin: the box just switched from drawn normally to drawn as a prediction.
             thin += !s[i - 1].coasting && s[i].coasting;
             const float widthChange = 100 * std::abs(s[i].box.width - s[i - 1].box.width) /
                                       std::max(s[i - 1].box.width, 1.0f);
@@ -205,6 +242,9 @@ struct Steadiness {
                     slowJitter.push_back(jitter.back());
             }
         }
+        // Lag. offset: the distance between the shown box and the detection it was matched to.
+        // While the object moves fast, trailMs converts the part of that offset along the
+        // direction of motion into time: how many ms behind the object the box is.
         for (size_t i = 0; i < s.size(); ++i) {
             if (!s[i].matched) continue;
             const float size = sizeOf(s[i].detected);
@@ -248,10 +288,14 @@ int main(int argc, char** argv) try {
         else if (!setParam(params, arg)) throw std::runtime_error("Unknown setting: " + arg);
     }
 
+    // Run the tracker over the recorded frames and keep what it shows: each track's visible life
+    // and, per frame, its boxes.
     const std::vector<Frame> frames = readDetections(argv[1], classes);
     Tracker tracker(classes, params);
     tracker.setFrameSize({1280, 720});  // the reference clips
 
+    // A track's visible life: its class, first and last visible frame, how many frames it was
+    // visible, and its box at both ends.
     struct Life {
         ClassId cls;
         size_t first, last, visibleFrames = 0;
@@ -276,12 +320,17 @@ int main(int argc, char** argv) try {
             samples[t.id].push_back(
                 {f, frames[f].timeMs / 1000.0, t.matched, t.coasting, t.box, t.detected, t.number});
         }
+        // A frame's confident detections count as covered when a visible track of the class is
+        // there to account for them (at most one per shown track).
         for (const auto& [cls, n] : dets) {
             detected[cls] += n;
             covered[cls] += std::min(n, shown[cls]);
         }
     }
 
+    // First table, per class: IDs = tracks that were ever shown (fewer is steadier); short = ones
+    // shown for 5 frames or fewer (likely identity breaks or noise); median life in frames;
+    // covered = share of confident detections that had a visible track.
     std::map<ClassId, std::vector<size_t>> byClass;  // visible frames per track
     for (const auto& [id, life] : lives) byClass[life.cls].push_back(life.visibleFrames);
     std::printf("%zu frames\n%-14s%5s%7s%13s%10s\n", frames.size(), "class", "IDs", "short",
@@ -321,6 +370,7 @@ int main(int argc, char** argv) try {
                     s.fastOffset.size(), mean(s.fastOffset), percentile(s.fastOffset, 90),
                     percentile(s.trailMs, 50), s.coastError.size(), mean(s.coastError),
                     percentile(s.coastError, 90));
+    // Compact text for a box: its center and size.
     auto describe = [](const cv::Rect2f& b) {
         char s[64];
         std::snprintf(s, sizeof(s), "(%4.0f,%4.0f) %3.0fx%-3.0f", b.x + b.width / 2,

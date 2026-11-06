@@ -1,3 +1,5 @@
+// Tag placement: candidate spots around a box, and the greedy choice among them with a little
+// memory (a tag pushed aside waits before returning) so tags stay steady while objects move.
 #include "TagLayout.h"
 
 #include <algorithm>
@@ -31,12 +33,14 @@ std::vector<cv::Rect> candidates(const cv::Rect& box, cv::Size tag, cv::Size fra
     return out;
 }
 
+// Total area of r that lies on top of the taken rects.
 int overlap(const cv::Rect& r, const std::vector<cv::Rect>& taken) {
     int area = 0;
     for (const cv::Rect& t : taken) area += (r & t).area();
     return area;
 }
 
+// r enlarged by margin pixels on every side.
 cv::Rect grown(const cv::Rect& r, int margin) {
     return {r.x - margin, r.y - margin, r.width + 2 * margin, r.height + 2 * margin};
 }
@@ -45,21 +49,28 @@ cv::Rect grown(const cv::Rect& r, int margin) {
 
 std::vector<cv::Rect> TagLayout::place(const std::vector<Item>& items, cv::Size frame,
                                        const std::vector<cv::Rect>& reserved) {
+    // taken: every rect a new tag must stay off, starting with the reserved areas and growing as
+    // tags are placed. placed: this frame's choices, which become next frame's memory.
     std::vector<cv::Rect> taken = reserved, out;
     std::map<int, Placed> placed;
     for (const Item& item : items) {
         const std::vector<cv::Rect> spots = candidates(item.box, item.size, frame);
         const int count = static_cast<int>(spots.size());
+        // Spot i is free if it overlaps no taken rect, even after growing it by margin.
         auto isFree = [&](int i, int margin) {
             return overlap(grown(spots[i], margin), taken) == 0;
         };
         // A tag that was pushed to a worse spot moves back to a better one only
         // after it has settled where it is, and only if that one has room to
         // spare, so it doesn't hop back and forth while two objects pass each other.
+        // (Hysteresis: being forced out of a spot is immediate, going back is delayed and needs
+        // room to spare. Different conditions each way keep a tag from flickering between spots.)
+        // Until it has settled it tries its current spot and worse ones first.
         const auto last = placed_.find(item.id);
         const int kept = last != placed_.end() ? last->second.spot : 0;
         const bool settled = last == placed_.end() || last->second.frames >= kSettleFrames;
         const int margin = item.size.height / 2;
+        // best: the index of the chosen spot (spots are ordered best first).
         int best = -1;
         for (int i = settled ? 0 : kept; i < count && best < 0; ++i)
             if (isFree(i, i < kept ? margin : 0)) best = i;
@@ -75,6 +86,7 @@ std::vector<cv::Rect> TagLayout::place(const std::vector<Item>& items, cv::Size 
         }
         out.push_back(spots[best]);
         taken.push_back(spots[best]);
+        // Count the frames in a row at this spot; a move restarts the count.
         const bool stayed = last != placed_.end() && kept == best;
         placed[item.id] = {best, stayed ? std::min(last->second.frames + 1, kSettleFrames) : 0};
     }
