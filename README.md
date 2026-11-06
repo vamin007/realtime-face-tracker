@@ -28,8 +28,6 @@ runs at the camera's full 30 frames per second on an Apple Silicon Mac.
 - [Testing](#testing)
 - [Branches](#branches)
 - [Project layout](#project-layout)
-- [Known limitations](#known-limitations)
-- [How it was built](#how-it-was-built)
 
 ---
 
@@ -295,22 +293,3 @@ scripts/    fetch_models.sh, export_yolo.sh, log_stats.py, make_laser_clip.py
 ```
 Not in git (see `.gitignore`): `build/`, downloaded `models/*.onnx`, `clips/`, `labels/` (your photos),
 `logs/`, `.cache/`, `.venv/`.
-
-## Known limitations
-- **The laser:**
-  - It hasn't been tested with a real laser on a real camera yet; tuning so far uses synthetic dots.
-  - Hands aren't detected on this branch, so a dot on a hand held in front of the face can count.
-  - On extremely bright skin (red within ~20 of 255) a dot can't be told apart by its color.
-- **The face network** has only been verified in unit tests and in runs with one person. It needs several
-  different people in view before it switches on.
-- **Platform:** macOS on Apple Silicon only (CoreML, AVFoundation camera).
-
-## How it was built
-I designed and directed this project and built it with AI coding agents (Claude Code):
-- I set the requirements and made the design decisions: what to detect, how targeting should behave, and
-  what to keep or remove.
-- I reviewed the results and verified the work.
-- Development used tests first, before-and-after measurements on recorded video, independent automated code
-  reviews (which caught real bugs, such as a physics error in the laser detection that the early test data
-  had hidden), and parallel agents working in isolated git worktrees.
-- The full reasoning and measurements for every step are in [PLAN.md](PLAN.md) and the commit messages.
