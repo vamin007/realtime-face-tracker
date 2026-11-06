@@ -1,160 +1,316 @@
-# Object Tracker
+# Real-Time Face Tracker
 
-Tracks people and faces through the MacBook camera (or a video file) and draws a live overlay with an ID
-per track, and a red `TARGET` box on a face a red laser dot is on. Each run also writes a CSV log of
-every visible track.
+A real-time computer-vision system in C++ that tracks **people and faces** through a MacBook camera (or a
+video file), **recognizes specific people** from a few photos, gets better at recognizing them on its own,
+and marks a face with a red **`TARGET`** box when a red laser dot is on it.
 
-- **Detection:** YOLOv8n for people (the model has COCO's 80 classes; only person's scores are read) and
-  YuNet for faces. The two run side by side; YOLO runs on the GPU / Neural Engine through ONNX Runtime +
-  CoreML.
-- **Tracking:** one Kalman filter per track in real time units; optimal (Hungarian) matching on box overlap
-  and center distance; confident detections first, then weak ones to keep existing tracks going (ByteTrack's
-  idea). Tracks ride out short drop-outs and wait at the frame edge for objects that left. Each type is
-  numbered on its own (`person #1`, `person #2`, `face #1`), and numbers are never reused within a run.
-  The filter smooths detection jitter, but a box snaps to its detection when the object moves faster than
-  the filter expects (a head turned quickly), so it doesn't trail behind.
-- **TARGET:** when a red laser dot is on a face, that face gets a red box labeled `TARGET` (within about
-  0.13 s). It is released once the face has been seen without the dot for 0.3 s; while the face isn't
-  detected (a hand passing in front of it) it stays the target for up to 0.75 s. The dot must be on the
-  face itself, not just inside its box: the face's outline is an oval built from its landmarks (forehead
-  to chin, cheek to cheek), cut to the face's detection box, and the pixels around the dot must be that
-  face's skin. A dot on the hair, an ear, the neck or the wall behind the head doesn't count. When hands
-  cover the face its landmarks go astray, and the outline falls back to an oval inside the box. A laser
-  adds red light, so a dot is judged against the skin right around it: its red rises well above the
-  skin's and much more than its green and blue, it glows (brighter red than the skin around it, and not
-  darker in green or blue), and it is small and round. On brightly lit skin the red has less room to rise
-  below 255, so less is asked of it, and the dot must then be overexposed to white in the middle.
-  Flashlights, lamps, red lips, a red sticker or bindi, and red clothes don't count. Only faces can be
-  targets, one at a time; the target follows the dot to another face (`--no-targeting` turns it off;
-  `--laser-redness N`, default 35, sets how much more a dot's red must rise than its green and blue).
-  Known limits: hands aren't detected, so a dot on a hand held in front of the face can't be told apart
-  from one on the face (a hand covering the face often breaks its landmarks, which shrinks the outline to
-  the box: that only partly helps). On skin whose red is within about 20 of 255 (a very brightly lit
-  face), a laser can't be told apart by its red, so it isn't found there.
+It runs two neural networks in parallel on every frame, keeps a stable ID on everything it tracks, and
+runs at the camera's full 30 frames per second on an Apple Silicon Mac.
 
-`v3` is the people-only version (it also tracks hands; this branch doesn't). `v2` has every feature (all
-80 COCO classes, object labels), and was built following [PLAN.md](PLAN.md); `main` holds the original
-version.
+| | Result (measured on recorded reference clips) |
+|---|---|
+| Speed | **30 FPS** live (the camera's maximum), up from ~10 FPS in the first version; ~15 ms from capture to screen |
+| Tracking stability | identity switches on the benchmark clip: **75 → 4** |
+| Lag behind fast motion | **13 ms → 6–7 ms** |
+| Face recognition | the enrolled person is labeled in **99%** of face frames |
+| Laser TARGET | on within **0.13 s** of a dot landing on the face; **0** false triggers on the wall, hair, shirt, a red sticker, or real footage without a laser |
+| Tests | **186** unit tests (GoogleTest) plus headless regression runs on recorded video |
 
-## Setup (macOS, Apple Silicon)
+---
+
+## Contents
+- [What it does](#what-it-does)
+- [How it works](#how-it-works)
+- [Setup, build and run](#setup-build-and-run)
+- [Recognizing people (face labels)](#recognizing-people-face-labels)
+- [The laser TARGET](#the-laser-target)
+- [Logs, measurements and tools](#logs-measurements-and-tools)
+- [Testing](#testing)
+- [Branches](#branches)
+- [Project layout](#project-layout)
+- [Known limitations](#known-limitations)
+- [How it was built](#how-it-was-built)
+
+---
+
+## What it does
+- **Detects** people (YOLOv8n) and faces (YuNet) in every frame.
+- **Tracks** each one across frames with a stable, per-type number (`person #1`, `face #2`). Numbers are
+  never reused within a run, and a track survives short detection drop-outs.
+- **Recognizes** people you've taught it from 5–10 photos, showing their name instead of `face #n`.
+- **Learns as it goes:** while it recognizes someone, it occasionally saves a new, useful photo of them,
+  behind strict quality checks, and trains a small neural network in the background.
+- **Targets** a face that a red laser dot is on (a red box labeled `TARGET`). The dot must be on the face
+  itself, not merely inside the face's detection box.
+- **Draws** a clean overlay (tags that avoid each other, a status panel, help on `h`), and **logs** every
+  visible track to CSV for analysis.
+
+## How it works
+
+```mermaid
+flowchart LR
+    C[Camera thread<br/>keeps newest frame] --> D
+    subgraph D[Detection, in parallel]
+        Y[YOLOv8n<br/>people<br/>CoreML]
+        F[YuNet<br/>faces + 5 landmarks]
+    end
+    D --> T[Tracker<br/>Kalman + Hungarian<br/>two-stage matching]
+    T --> G[Laser targeting]
+    T --> R[Face recognition<br/>background thread]
+    R <--> L[(Label photos<br/>+ embeddings)]
+    R --> N[Reinforcer thread<br/>auto-photos, FaceNet training]
+    G --> O[Overlay + CSV log]
+    R --> O
+```
+
+### 1. Capture
+A dedicated thread reads the camera and keeps only the **newest** frame, so processing never works through
+a queue of stale frames. Each frame is timestamped; the end-of-run report shows how old frames were when
+processing started. Video files use the same interface; `--realtime` makes a file drop frames like a live
+camera does.
+
+### 2. Detection: two networks in parallel
+- **YOLOv8n** finds people. The model has COCO's 80 classes, but the decoder reads only the box and *person*
+  score rows of its output tensor, so no other class ever reaches non-maximum suppression (NMS, which merges
+  overlapping boxes of the same object).
+- **YuNet** finds faces and 5 landmarks per face: both eyes, the nose tip and both mouth corners.
+- The two run on separate threads, so a frame costs the slower of the two, not their sum.
+- **Speed-up from ~10 to 30 FPS:**
+  - YOLO runs on Apple's GPU / Neural Engine through **ONNX Runtime with the CoreML execution provider**.
+  - It was re-exported at **640×384**, which suits a 16:9 camera frame better than 640×640 and wastes less
+    compute on padding.
+  - A model is given to CoreML **only if CoreML can run its whole graph**. A partly supported model bounces
+    data between the CPU and the accelerator, and in testing ran slower than plain CPU.
+  - Compiled CoreML models are cached in `.cache/coreml/`.
+- Each detector has two confidence levels: **strong** detections can start tracks, while **weak** ones can
+  only keep existing tracks alive.
+
+### 3. Tracking
+A SORT/ByteTrack-style multi-object tracker (`src/Tracker.cpp`, `src/KalmanBox.cpp`, `src/Assignment.cpp`):
+- **One Kalman filter per track.** It models a constant-velocity box (center, size and their velocities).
+  Each frame it *predicts* where the object should be and *corrects* with the matched detection. It's
+  advanced by the **real time between frames**, so a dropped frame doesn't distort motion.
+- **Snapping.** When the filter and the detection disagree by more than the detector's normal jitter (fast
+  motion), the box moves toward the detection, so it doesn't trail behind a quickly turned head.
+- **Optimal matching.** Tracks and detections are paired with the **Hungarian algorithm** (a globally best
+  one-to-one assignment). The cost combines box overlap (IoU, intersection over union) and center distance
+  measured in units of object size, with gates on size ratio and distance.
+- **Two stages (ByteTrack's idea).** Confident detections are matched first, then weak detections to the
+  tracks still unmatched.
+- **Track lifecycle:**
+  - A track needs 3 matches before it's shown, which filters one-frame false positives.
+  - A missing track *coasts* on its prediction (drawn with corners only) while its velocity decays.
+  - It's dropped after a timeout, which is longer at the frame edge, where an object probably just left.
+- **Numbering.** Each class keeps its own counter, and a number is given only when a track is confirmed.
+
+### 4. Face recognition
+`src/Labels.cpp`, `src/Enrollment.cpp`, `src/Recognizer.cpp`, `src/Embedder.cpp`.
+- **Enrollment.** Each person is a folder of photos. A sync finds the face in each photo, aligns it with its
+  landmarks, and turns it into an **embedding** with **SFace**: 128 numbers, normalized, where photos of
+  the same person point in nearly the same direction. A mirrored copy is embedded too, because the live view
+  is mirrored. Embeddings are cached per photo, keyed by name, size and modification time.
+- **Live matching.** Face crops go to a **background thread** for embedding, so the frame rate is unaffected,
+  and are compared with each label's photos by **cosine similarity**.
+  - A label's score is the mean of its 3 most similar photos.
+  - It must pass a threshold and beat the runner-up label by a margin.
+  - A face takes a name after 3 agreeing checks and loses it after 4 misses, so names don't flicker.
+  - Each label (one person) belongs to at most one face at a time.
+
+### 5. Self-reinforcing recognition
+`src/Reinforcement.cpp`, `src/FaceNet.cpp`.
+- **Auto-photos.** While a person is recognized, it occasionally saves a new photo of their face into their
+  label folder, which is used at once and on every later start. The hard part is **not reinforcing
+  mistakes**, so a photo is taken only when all of these hold:
+  - the match is stable (5 matching checks in a row) and clear (score and margin above the normal bar);
+  - the face is detected now, at least 80 px wide, sharp (variance of the Laplacian), and not under the laser;
+  - it's **new** (not too similar to the label's existing photos);
+  - it's rate-limited (one per 30 s per person, at most 40, replacing the most redundant one; your own
+    photos are never touched).
+- **FaceNet**, a small neural network:
+  - an ensemble of three multilayer perceptrons (`cv::ml::ANN_MLP`, 128 → 32 → one output per person +
+    "other") trained on the embeddings in a background thread;
+  - the "other" output learns from strangers' **embeddings** (never their photos);
+  - a single network was badly overconfident on strangers; averaging three, trained with noise
+    augmentation, cut false confident matches from 6–12% to under 1% in tests;
+  - it stays **off** until it has seen enough people (3 photos of each label and 20 faces of 5+ others),
+    because a network that has never seen strangers labels everyone as someone it knows;
+  - once on, it can relax a borderline match or veto a doubtful one; the photo matching stays the rule.
+- **Threads.** Only the tracking thread changes label data. Workers get copies. Trained networks are
+  published as immutable `shared_ptr<const FaceNet>` objects. A ThreadSanitizer build of the threaded tests
+  reported nothing.
+
+### 6. Laser TARGET
+`src/Targeting.cpp`:
+- **Face geometry.** An oval from the 5 landmarks (forehead to chin, cheek to cheek, tilted with the eyes),
+  cut to the face's detection box. Hair, ears, the neck and the wall in the box's corners fall outside it.
+  Implausible landmarks (for example a hand over the face) fall back to a safe oval.
+- **A laser adds light.** So a dot is judged against the skin **right around it**: red rises well above the
+  skin and much more than green and blue, often with an overexposed white middle. This works across skin
+  tones and lighting. On bright skin, where red has little room left below 255, the rule scales down and
+  requires the white middle.
+- **Light vs. pigment.** A dot must *glow* (brighter red than its surroundings) and not be darker in green or
+  blue, which rejects red stickers, bindis and red marks that merely reflect light.
+- **Shape and context.** It must be small and round, with a ring of that face's skin around it.
+- **Timing.** On after 0.1 s of dot, released after 0.3 s without it, kept up to 0.75 s while the face is
+  briefly undetected. Only faces can be targets, one at a time.
+
+### 7. Overlay and output
+Tags are dark plates with a colored stripe, placed so they never overlap each other or leave the frame. A
+status panel shows FPS, counts per class and active modes. **Red is reserved for `TARGET`**, and a unit test
+checks that nothing else is drawn red. Drawing costs ~0.2 ms per frame.
+
+---
+
+## Setup, build and run
+**Requirements:** macOS on Apple Silicon, Homebrew.
+
 ```sh
 brew install cmake opencv onnxruntime googletest clang-format
 scripts/fetch_models.sh          # downloads and checksums the face and recognition models
 scripts/export_yolo.sh 384 640   # YOLO with a 16:9-friendly input (installs Ultralytics in .venv)
-```
 
-## Build and test
-```sh
 cmake -S . -B build
 cmake --build build -j8
-ctest --test-dir build           # unit tests (needs googletest)
+ctest --test-dir build           # unit tests
 ```
 
-## Run
 ```sh
 ./build/tracker                          # camera 0: people and faces
+./build/tracker --debug                  # show confidences, laser results, label scores and timings
 ./build/tracker --classes face           # only these classes (person, face, label names)
-./build/tracker --video clips/hands_face.mov
-./build/tracker --video clips/hands_face.mov --no-window   # headless: just the log and a summary
-./build/tracker --video clips/hands_face.mov --realtime    # play at camera speed, skipping frames when busy
-./build/tracker --backend cpu                             # don't use CoreML
-./build/tracker --debug                                   # show confidences, laser results, label scores and timings
-./build/tracker --record clips/new.mov                    # also save the raw camera feed
-./build/tracker --conf-face 0.5                           # per-detector thresholds: --conf-yolo/-face
-./build/tracker --list-classes
+./build/tracker --video clips/demo.mov   # a video file instead of the camera
+./build/tracker --video clips/demo.mov --no-window   # headless: just the log and a summary
+./build/tracker --video clips/demo.mov --realtime    # play at camera speed, dropping frames when busy
+./build/tracker --record clips/new.mov   # also save the raw camera feed
+./build/tracker --backend cpu            # don't use CoreML
 ./build/tracker --help                   # all options
 ```
-Keys: `p` pause/resume, `t` trails on/off, `d` debug view on/off, `h` help, `q` or `Esc` quit. Ctrl-C in the terminal also stops cleanly.
-The panel in the top-left corner shows the frame rate, how many of each class are tracked, and which modes are on.
-Boxes drawn with only their corners are predictions: the object hasn't been detected for a few frames, and the tracker is keeping its box going.
-The first camera run asks for camera access: allow it for your terminal app in **System Settings → Privacy & Security → Camera**.
+**Keys:** `p` pause, `t` motion trails, `d` debug view, `h` help, `q`/`Esc` quit. The first camera run asks
+for camera access: allow it for your terminal app in **System Settings → Privacy & Security → Camera**.
 
-At startup it prints where each detector runs. CoreML compiles a model on first use (a few seconds) and
-keeps the result in `.cache/coreml/`. A model runs on CoreML only if CoreML can take all of it; otherwise
-it runs on the CPU (for a partly supported model that was faster).
-
-## Custom labels (faces)
-Teach it a specific person's face from a few photos, so their face shows their name instead of `face #n`. Each label is a folder of photos in `labels/`:
-
-1. Make a folder named after the person, e.g. `labels/alex/` (letters, digits, `_` and `-`; not `TARGET`, which is the red box's tag).
-2. Put **5–10 photos** of their face there, from different angles and in different light. JPEG and PNG work; convert iPhone HEIC photos first (`sips -s format jpeg IMG_1234.heic --out IMG_1234.jpg`).
-3. Run the tracker. At startup it looks at new, changed and removed photos, says for each one whether it found a face, and warns about anything that would hurt recognition.
+## Recognizing people (face labels)
+1. Make a folder named after the person, e.g. `labels/alex/` (letters, digits, `_` and `-`; not `TARGET`).
+2. Put **5–10 photos** of their face in it, from different angles and in different light. JPEG and PNG
+   work; convert iPhone HEIC first (`sips -s format jpeg IMG_1234.heic --out IMG_1234.jpg`).
+3. Run the tracker. At startup it processes new and changed photos and reports on each one.
 
 ```sh
-./build/tracker --sync-labels                  # do step 3 now, and check every label
-./build/tracker --list-labels                  # photos and usable photos per label
-./build/tracker --enroll alex a.jpg b.jpg      # or: copy photos into labels/alex/ and sync
-./build/tracker --add-photos alex c.jpg        # copy more photos in
+./build/tracker --sync-labels              # process photos now and check every label
+./build/tracker --list-labels              # photos and usable photos per label
+./build/tracker --enroll alex a.jpg b.jpg  # or copy photos into labels/alex/
+./build/tracker --add-photos alex c.jpg
 ./build/tracker --rename-label alex alexis
-./build/tracker --remove-label alexis          # moves labels/alexis/ to labels/.removed/, photos and all
-./build/tracker --classes alex                 # show only alex's face
-./build/tracker --no-auto-photos               # recognize, but take no photos (see below)
+./build/tracker --remove-label alexis      # moves the folder to labels/.removed/, photos kept
+./build/tracker --no-auto-photos           # recognize, but take no photos
 ./build/grab_frames clips/new.mov /tmp/alex --crop face --count 8   # face photos from a video
 ```
-- It stores a neural-network *embedding* (SFace) of the face in each photo, plus a mirrored copy, in the folder's hidden `.embeddings.yml`. Only new or changed photos are looked at again. An optional `label.yml` can set `threshold:` (how close a face must be to count) and `auto_photos: false`.
-- Photos without a face aren't used. A sync also points out photos that don't look like the rest, labels with fewer than 5 usable photos, and labels so alike that recognition may mix them up.
-- A sync needs only the face detector. If it didn't load, startup leaves the labels as they were and says so, and `--sync-labels`, `--enroll` and `--add-photos` stop with an error. With `--no-faces`, startup leaves new photos for `--sync-labels`.
-- While tracking, faces are checked in the background a few times a second. A face takes the label after 3 matching checks, and each label is one person, so at most one face has it. Label changes are picked up at the next start.
-- **It learns as it goes.** While it recognizes someone, it now and then takes a photo of their face for their label, e.g. `labels/alex/auto_20261104_153012.jpg`: at most one every 30 s, and only of a face recognized clearly and steadily (5 checks in a row), seen well (detected, at least 80 px wide, sharp, not the TARGET or under the laser) and from an angle or in light the label's photos don't show yet. It's used at once, and from the next start like any other photo. A label keeps up to 40 of them; then the one most like another photo makes way (your own photos are never touched). A sync lists them: delete any that show someone else. `--no-auto-photos` turns this off for a run, `auto_photos: false` in `label.yml` for one label.
-- **Face network.** A small neural network (`labels/.face_net.yml`) learns the labeled faces from all their photos together, and what other people look like, from faces it saw that matched no label. It's retrained in the background after new photos, and by `--sync-labels`. It needs 3 photos of each label and 20 faces of at least 5 other people (seen while tracking); until then it's off and recognition uses the photos alone, as the startup line, `--sync-labels` and `--list-labels` say. Once on, a face scoring up to 0.08 below a label's threshold still counts if the network is at least 90% sure it's that person, and a match doesn't count if it's 90% sure it's someone else. The debug view shows its answer for each face.
-- **Privacy:** all of it stays on this computer, in `labels/`. Photos are only taken of people you labeled, while they're recognized. Faces of anyone else are never saved as photos: for the network it keeps only their embeddings (128 numbers per face, at most 500, no names) in `labels/.negatives.yml`; delete that file to forget them. With `--no-auto-photos` it keeps neither.
-- A face with the laser on it still shows `TARGET`.
-- **Labels from `v2`:** face labels work as they are. Object labels (e.g. a phone) are reported as unsupported and left untouched, so they still work if you switch back to `v2`; `class:` and `whole_photo:` lines in `label.yml` are ignored. Labels made by an even earlier version (one `label.yml` with the embeddings) are converted automatically; the old file is kept as `.label-v1.yml`.
-- `labels/` holds your photos and isn't committed to git.
+- A sync flags photos without a face, photos that don't look like the rest, labels with fewer than 5 usable
+  photos, and labels so alike that recognition may confuse them.
+- An optional `label.yml` can set `threshold:` and `auto_photos: false`.
+- **Privacy:** everything stays on your computer in `labels/`, which is git-ignored. Photos are taken only of
+  people you labeled. Other faces are kept only as anonymous embeddings (at most 500) in
+  `labels/.negatives.yml`; delete it to forget them.
 
-## Logs
-Each run writes `logs/run_<date>_<time>.csv`: one row per visible track per frame. The columns are `time_ms`, `frame`, `id` (unique for the run), `number` (the one on screen), `class`, `label`, `matched` (0 = not detected this frame), the box, `conf`, `target`, `laser` (faces: how much more the red of the laser dot on it rose than its green and blue; empty if none) and `coasting` (1 = drawn with corners only, as a prediction). To summarize one or more runs:
+## The laser TARGET
+> **Laser pointers can damage eyes in a fraction of a second.** Aim at the cheek or forehead, never near
+> the eyes, or test with a printed photo of a face.
+
+- `--laser-redness N` (default 35) sets how much more a dot's red must rise than its green and blue.
+- `--no-targeting` turns it off.
+- `--dump-laser file.csv` writes, for each face and frame, whether a dot was found, where, its size,
+  redness, glow and how much of its surroundings is skin: useful for tuning on a recorded clip.
+
+**Testing without a laser.** `scripts/make_laser_clip.py` draws physically modeled laser dots onto real
+footage (added as light, with the camera's color subsampling, saved losslessly). The dots go at positions
+computed from the tracker's own face landmarks: on the cheek, forehead and nose (should be TARGET), and on
+the wall inside the face box, above the hairline, beside the head, the shirt, and a static red mark (should
+not):
 ```sh
-scripts/log_stats.py logs/run_*.csv
-```
-It prints the frame rate, the number of IDs per class and how long tracks lasted. Fewer IDs and longer lifetimes mean steadier tracking. It also counts flicker per minute: boxes that vanish and come back, switch to thin, wobble or change class, label or number.
-
-Every run ends with the time per frame of each stage (mean and 95th percentile): how long the frame waited in the camera, detection, tracking, labels and targeting, drawing, display, and capture to screen in total.
-
-To tune the tracker without re-running the neural networks, save a clip's detections once and replay them:
-```sh
-./build/tracker --video clips/hands_face.mov --no-window --no-log --dump-detections /tmp/dets.csv
-./build/tracker_replay /tmp/dets.csv --tracks lostTimeout=1.5   # any TrackerParams field
-```
-Besides IDs it reports flicker and lag per class: how far the shown box is from its detection, overall and while the object moves fast, and how far behind it trails.
-
-## Testing the laser
-**Laser pointers can damage eyes in a fraction of a second.** Aim at the cheek or forehead, never near
-the eyes, or use a printed face photo or a mannequin head.
-
-To check it without a laser, draw synthetic dots onto a clip at places taken from the tracker's own face
-landmarks (cheek, forehead, nose: should be TARGET; the wall in the face's box, above the hairline, beside
-the head, the shirt, and a static red mark on the cheek: shouldn't), then run the tracker on the result.
-A dot is added as light (red saturates, green and blue rise a little, white in the middle when bright),
-the red mark as pigment (lit like the skin), and the clip is saved losslessly (FFV1, `.mkv`, about 0.5 GB)
-after subsampling the colors like a camera's video feed; a lossy re-encode washes out a dot's red rim.
-```sh
-./build/tracker --video clips/hands_face.mov --no-window --no-log --dump-detections /tmp/dets.csv
-.venv/bin/python scripts/make_laser_clip.py clips/hands_face.mov /tmp/dets.csv /tmp/laser.mkv /tmp/schedule.csv
+./build/tracker --video clips/demo.mov --no-window --no-log --dump-detections /tmp/dets.csv
+.venv/bin/python scripts/make_laser_clip.py clips/demo.mov /tmp/dets.csv /tmp/laser.mkv /tmp/schedule.csv
 ./build/tracker --video /tmp/laser.mkv --no-window --dump-laser /tmp/laser_dump.csv
 ```
-For `flashlight.mov` add `--plan flashlight`: its dots fall where the flashlight lights the face. The spots
-come from the landmarks the tracker itself uses, so the on-face results partly check the tracker against
-itself; only the box-corner spots don't depend on the landmarks.
 
-`--dump-laser` writes, per face and frame, whether a dot was found, where, its size, its redness (how much
-more its red rose than its green and blue), its glow (its brightest red above the skin around it) and how
-much of the ring around it is skin. To tune on a real laser, record a clip (`--record clips/laser.mov`)
-and look at that file for it.
+## Logs, measurements and tools
+- **CSV log.** Every run writes `logs/run_<date>_<time>.csv`, one row per visible track per frame: `time_ms`,
+  `frame`, `id`, `number`, `class`, `label`, `matched`, the box, `conf`, `target`, `laser`, `coasting`.
+- **`scripts/log_stats.py logs/run_*.csv`** summarizes runs: IDs per class, track lifetimes, and flicker per
+  minute (boxes that vanish and return, wobble, or change label or number).
+- **Latency report.** Every run ends with the time per frame of each stage, mean and 95th percentile:
+  capture age, detection, tracking, labels and targeting, drawing, display, and capture to screen.
+- **Tracker replay.** Tune the tracker without re-running the neural networks: save a clip's detections once,
+  then replay them with different parameters.
+  ```sh
+  ./build/tracker --video clips/demo.mov --no-window --no-log --dump-detections /tmp/dets.csv
+  ./build/tracker_replay /tmp/dets.csv --tracks lostTimeout=1.5   # any TrackerParams field
+  ```
 
-## Layout
+## Testing
+- **186 GoogleTest unit tests** (`tests/`):
+  - the tracker (stable IDs, coasting, edge exits, weak detections, snapping);
+  - Hungarian assignment and the Kalman filter;
+  - YOLO decoding and the ONNX/CoreML model loader;
+  - the label database (sync, enrollment, migration, corrupt photos);
+  - face reinforcement (every capture gate, the network's training and its off state);
+  - laser targeting (synthetic scenes: bright and dark skin, static red marks, broken landmarks, timing);
+  - the overlay (layout, and only `TARGET` drawn red).
+- **Regression runs.** Headless runs on two recorded reference clips, compared with numbers kept in
+  [PLAN.md](PLAN.md): IDs per class, TARGET episodes, recognition rate and FPS. Every change was measured
+  before and after.
+- **Mutation checks.** Some new checks were verified by reverting them and confirming their tests fail.
+
+## Branches
+| Branch | What it is |
+|---|---|
+| `laser-target` (default) | the version described here: laser `TARGET`, people and faces, face recognition with reinforcement |
+| `flashlight-targeting-base` | the same system, plus hand detection, with a `TARGET` triggered by a bright light suddenly shining on a face |
+| `main` | the original prototype (YOLO + face + hand detection with a simple SORT-style tracker) |
+
+[PLAN.md](PLAN.md) records the full development history: each milestone, the design decisions, and the
+measurements behind them.
+
+## Project layout
 ```
-src/        Camera (capture thread); ClassRegistry (person, face, labels); Detector runs the
-            IDetector implementations (YoloDetector, FaceDetector) side by side;
-            OrtModel (ONNX Runtime + CoreML); Tracker (+ KalmanBox, Assignment); Targeting (TARGET);
-            Embedder, Labels, Enrollment, Recognizer (face labels); Options; Overlay
-            (+ TagLayout); Logger; main
-labels/     face labels: a folder of photos per person, with optional label.yml (not in git)
-tools/      replay.cpp: the tracker on saved detections (tracker_replay); grab_frames.cpp:
-            a video's frames, or face crops, saved as photos (grab_frames)
-tests/      GoogleTest unit tests (tracker_tests)
+src/
+  main.cpp              the frame loop: capture → detect → track → target / recognize → draw and log
+  Camera                capture thread that keeps only the newest frame
+  Detector, IDetector   runs the detectors side by side
+  YoloDetector          people (YOLOv8n, person scores only)
+  FaceDetector          faces + 5 landmarks (YuNet)
+  OrtModel              ONNX Runtime wrapper; CoreML only when it covers the whole model
+  Tracker, KalmanBox,   multi-object tracking: Kalman filters, Hungarian assignment, two-stage matching
+  Assignment
+  Targeting             laser-dot TARGET
+  Labels, Enrollment    face-label folders, photo syncing and caching
+  Embedder              SFace face embeddings
+  Recognizer            live recognition on a background thread
+  Reinforcement,        auto-photos and the FaceNet ensemble
+  FaceNet
+  Overlay, TagLayout    drawing, tag placement, status panel, help
+  Options, Logger,      command line, CSV log, latency statistics
+  Latency
+tools/      tracker_replay (tracker on saved detections), grab_frames (frames or face crops from a video)
+tests/      GoogleTest unit tests
 scripts/    fetch_models.sh, export_yolo.sh, log_stats.py, make_laser_clip.py
-models/     *.onnx (downloaded, not in git)
-clips/      reference videos for regression runs (not in git)
-logs/       run logs (not in git)
 ```
+Not in git (see `.gitignore`): `build/`, downloaded `models/*.onnx`, `clips/`, `labels/` (your photos),
+`logs/`, `.cache/`, `.venv/`.
+
+## Known limitations
+- **The laser:**
+  - It hasn't been tested with a real laser on a real camera yet; tuning so far uses synthetic dots.
+  - Hands aren't detected on this branch, so a dot on a hand held in front of the face can count.
+  - On extremely bright skin (red within ~20 of 255) a dot can't be told apart by its color.
+- **The face network** has only been verified in unit tests and in runs with one person. It needs several
+  different people in view before it switches on.
+- **Platform:** macOS on Apple Silicon only (CoreML, AVFoundation camera).
+
+## How it was built
+I designed and directed this project and built it with AI coding agents (Claude Code):
+- I set the requirements and made the design decisions: what to detect, how targeting should behave, and
+  what to keep or remove.
+- I reviewed the results and verified the work.
+- Development used tests first, before-and-after measurements on recorded video, independent automated code
+  reviews (which caught real bugs, such as a physics error in the laser detection that the early test data
+  had hidden), and parallel agents working in isolated git worktrees.
+- The full reasoning and measurements for every step are in [PLAN.md](PLAN.md) and the commit messages.
