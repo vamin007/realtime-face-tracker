@@ -1,3 +1,7 @@
+// OrtModel: creates an ONNX Runtime session (trying CoreML first when asked, then falling back
+// to the CPU) and runs it on cv::Mat tensors. See OrtModel.h for the overview. The interesting
+// part is the constructor: it only accepts CoreML when ORT reports that CoreML took every node
+// of the model's graph, and finds that out by parsing ORT's own log message.
 #include "OrtModel.h"
 
 #include <coreml_provider_factory.h>
@@ -15,9 +19,13 @@ namespace {
 
 // ONNX Runtime reports how many graph nodes CoreML took in a log message; this
 // keeps the latest one so it can be shown next to the model.
+// (The log message is the only source of this number here. The mutex guards the string
+// because the log hook is a global callback, not tied to one OrtModel.)
 std::mutex gLogMutex;
 std::string gCoremlSummary;
 
+// ORT's logging hook: remembers the CoreML coverage message and prints real errors; every
+// other message is dropped to keep the console quiet.
 void ORT_API_CALL onOrtLog(void*, OrtLoggingLevel severity, const char*, const char*, const char*,
                            const char* message) {
     const std::string text = message ? message : "";
@@ -29,15 +37,20 @@ void ORT_API_CALL onOrtLog(void*, OrtLoggingLevel severity, const char*, const c
     if (severity >= ORT_LOGGING_LEVEL_ERROR) std::cerr << "onnxruntime: " << text << '\n';
 }
 
+// The process-wide ONNX Runtime environment, created on first use (a function-local static is
+// initialized once, thread-safely) and shared by every session; it must outlive them.
 Ort::Env& ortEnv() {
     // INFO so the CoreML summary reaches onOrtLog; other messages are filtered there.
     static Ort::Env env(ORT_LOGGING_LEVEL_INFO, "tracker", onOrtLog, nullptr);
     return env;
 }
 
+// How much of the model's graph CoreML took.
 struct Coverage {
     int supported = -1;  // -1: unknown (no summary was logged)
     int total = -1;
+    // Everything on CoreML. Also true when unknown: with no summary there is nothing to say it
+    // fell short, so the session is trusted.
     bool full() const { return supported < 0 || supported == total; }
     std::string text() const {
         return supported < 0 ? ""
@@ -71,6 +84,8 @@ std::string cacheFolder(const std::string& base, const std::string& modelPath) {
 
 }  // namespace
 
+// The ONNX Runtime state behind OrtModel. Names are copied out once because Run() wants
+// C strings for every call.
 struct OrtModel::Impl {
     Ort::Session session{nullptr};
     std::vector<std::string> inputNames, outputNames;
@@ -83,6 +98,8 @@ OrtModel::OrtModel(const std::string& path, Backend backend, const std::string& 
         throw std::runtime_error("Model file not found: " + path +
                                  " (run scripts/fetch_models.sh)");
 
+    // Session settings shared by every attempt: all of ORT's graph optimizations (e.g. fusing
+    // adjacent operations), and a small thread pool per model.
     auto baseOptions = [&] {
         Ort::SessionOptions options;
         options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
@@ -95,18 +112,23 @@ OrtModel::OrtModel(const std::string& path, Backend backend, const std::string& 
     // only if it takes the whole model: when part of it stays on the CPU, moving
     // data back and forth costs more than it saves (measured on the palm model:
     // 14.6 ms partly on CoreML vs 12.5 ms on the CPU).
+    // `whyCpu` records why CoreML wasn't used, for backendInfo_.
     bool created = false;
     std::string whyCpu;
     if (backend == Backend::CoreML) {
         for (const std::string format : {"MLProgram", "NeuralNetwork"}) {
             try {
                 Ort::SessionOptions options = baseOptions();
+                // MLComputeUnits_ALL lets CoreML pick among CPU, GPU and Neural Engine. The
+                // cache folder is per model version and per format (see cacheFolder()).
                 options.AppendExecutionProvider("CoreML",
                                                 {{kCoremlProviderOption_ModelFormat, format},
                                                  {kCoremlProviderOption_MLComputeUnits,
                                                   kCoremlProviderOption_MLComputeUnits_ALL},
                                                  {kCoremlProviderOption_ModelCacheDirectory,
                                                   cacheFolder(cacheDir, path) + "/" + format}});
+                // Forget the last model's coverage message: creating the session below logs
+                // this model's, which coverage() then reads.
                 {
                     std::lock_guard<std::mutex> lock(gLogMutex);
                     gCoremlSummary.clear();
@@ -118,6 +140,8 @@ OrtModel::OrtModel(const std::string& path, Backend backend, const std::string& 
                     cov = coverage(gCoremlSummary);
                 }
                 if (!cov.full()) {
+                    // Part of the graph would stay on the CPU: drop this session (it is freed
+                    // when `session` goes out of scope) and try the next format, then the CPU.
                     whyCpu = "CoreML could only take " + cov.text();
                     continue;
                 }
@@ -127,16 +151,21 @@ OrtModel::OrtModel(const std::string& path, Backend backend, const std::string& 
                     "CoreML " + format + (cov.text().empty() ? "" : " (" + cov.text() + ")");
                 break;
             } catch (const std::exception& e) {
+                // CoreML couldn't load this model in this format (or isn't available at all).
                 if (whyCpu.empty()) whyCpu = std::string("CoreML failed: ") + e.what();
             }
         }
     }
+    // CPU: requested, or the fallback when CoreML didn't fit. A failure here propagates to the
+    // caller, since there is nothing left to fall back to.
     if (!created) {
         impl_->session = Ort::Session(ortEnv(), path.c_str(), baseOptions());
         backendInfo_ = "CPU";
         if (!whyCpu.empty()) backendInfo_ += " (" + whyCpu.substr(0, 100) + ")";
     }
 
+    // Remember the input/output names and the first input's shape; run() and the detectors
+    // need them on every frame.
     Ort::AllocatorWithDefaultOptions allocator;
     for (size_t i = 0; i < impl_->session.GetInputCount(); ++i)
         impl_->inputNames.push_back(impl_->session.GetInputNameAllocated(i, allocator).get());
@@ -145,6 +174,7 @@ OrtModel::OrtModel(const std::string& path, Backend backend, const std::string& 
     impl_->inputShape = impl_->session.GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
 }
 
+// Defined here, where Impl is a complete type (required for unique_ptr<Impl>).
 OrtModel::~OrtModel() = default;
 
 std::vector<int64_t> OrtModel::inputShape() const { return impl_->inputShape; }
@@ -152,6 +182,8 @@ std::vector<int64_t> OrtModel::inputShape() const { return impl_->inputShape; }
 std::vector<cv::Mat> OrtModel::run(const cv::Mat& input) {
     CV_Assert(input.type() == CV_32F && input.isContinuous());
     std::vector<int64_t> shape(input.size.p, input.size.p + input.dims);
+    // Wrap the Mat's memory as an ORT tensor without copying (the const_cast is only because
+    // the API takes a non-const pointer; the input is not modified).
     const Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
     Ort::Value tensor = Ort::Value::CreateTensor<float>(
         memory, const_cast<float*>(input.ptr<float>()), input.total(), shape.data(), shape.size());
