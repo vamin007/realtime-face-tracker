@@ -129,6 +129,28 @@ Layout: `src/{app,core,io,infer,detect,track,recog,target,ui}/`, plus `tests/`, 
 ## Milestones
 Each milestone builds, runs and gets its own git commit.
 
+### Laser branch update (2026-11-05): no hands, review fixes, face reinforcement
+The user's call: "change the laser targeting branch to remove hand detection", plus the laser code review's fixes, plus the face reinforcement from `flashlight-targeting-base` (merged in).
+- **Hands removed** (commit 4bde7d8): `HandDetector`, the hand class, `--no-hands`/`--conf-hand`/`--hand-model`, the palm model download, the laser's hand masking and the hand-only tests. Classes are person and face. Uncapped speed 66 → 100 FPS (detection 14.1 → 9.2 ms per frame); IDs unchanged (face 1, person 2 per clip). **Known limit:** a laser dot on a hand held in front of the face now counts.
+- **Review fixes** (commit d7321c5):
+  - *Bright skin:* a laser adds red, so on skin with red near 255 the old "60 redder than the skin" rule found 0 of 291 dots. Now red must rise ≥ 25 above the skin right around it, and ≥ 35 more than green and blue (both capped by the room left below 255); with under ~25 of room a white core is also required (lit lips passed otherwise).
+  - *Static red marks:* a dot must glow (peak red ≥ ring + 30, or saturated) and not be darker in green/blue than the ring (pigment absorbs, light only adds). The red-mark segment went from 97 TARGET frames to 0.
+  - *On the face:* landmarks with eyes-to-mouth / eye distance outside 0.6–1.7 (hands over the face) fall back to the box oval, and the face mask is cut to the detection box: a dot outside the box never counts. Chin at 0.6 × eyes-to-mouth (0.8 reached the neck).
+  - *Timing:* released after 0.3 s of frames where the face was checked without the dot; kept up to 0.75 s while the face is undetected (before, `coastTime` was dead).
+  - *Other:* help/debug texts say laser; overexposed cores touching red join whole; max dot size 2% → 1% of the face; `Target::dot` removed.
+  - *Test clips:* `make_laser_clip.py` now adds dots as light (Gaussian, saturating, green/blue crosstalk, bloom, 4:2:0 color subsampling), adds a static red mark and a shirt spot, has `--plan flashlight` for flashlight-lit skin, and writes lossless FFV1 (the old mp4v re-encode destroyed small dots).
+- **Merge with face reinforcement** (commit 05305fe): on this branch "lit" (no auto-photo) means the laser dot is on the face or it's the TARGET.
+- **Measured on the merged branch** (additive synthetic dots; 90 frames per segment unless noted):
+
+| Clip | On-face dots (cheek / forehead / nose / cheek) | TARGET on after | Off-face spots, red mark, shirt |
+|---|---|---|---|
+| `hands_face.mov` | found 88 / 90 / 84 / 90; TARGET 86 each | 0.13 s | 0 TARGET (red mark: 1 dot frame, 0 TARGET) |
+| `flashlight.mov` (lit skin) | cheek 39/45, forehead 60/60 and 33/33, nose 37/39; TARGET 41 / 56+29 / 34 | 0.13 s (nose 0.17 s) | 0 TARGET |
+| `flashlight.mov`, cheek at skin red 236 | 24/48 found, TARGET 26 | 0.73 s | — |
+
+  Real clips (no laser): 0 dots, 0 TARGET; `me` recognized on 99.2% / 98.9% of face rows; 4 auto-photos on `hands_face.mov` (30 s of video apart); face network off (one person). `--realtime` 30.0 FPS; uncapped ~90 FPS. Unit tests: 186.
+- **Limits:** a dot on a hand in front of the face counts; on skin with red within ~20 of 255 a laser isn't found; on-face test spots are placed from the same landmarks the oval uses, so those scores are partly self-consistent (only the box-corner spots are independent). **Not checked:** a real laser on a real camera — record one (`--record clips/laser.mov`) and look at `--dump-laser`.
+
 ### M0: Foundation (no behavior changes)
 - `git init` and commit the current code as the baseline. `.gitignore` covers `build/`, `logs/`, `models/*.onnx`, `.venv/` and `third_party/`.
 - CMake split: a `tracker_core` library, the `tracker` executable and a `tracker_tests` target (GoogleTest from `brew install googletest`, run through `ctest`).
