@@ -40,7 +40,7 @@ public:
     // The input must be continuous in memory. The outputs are copies, owned by the caller.
     std::vector<cv::Mat> run(const cv::Mat& input);
 
-    // "CoreML (312/315 nodes)", "CoreML", or "CPU".
+    // e.g. "CoreML (315/315 nodes)", "CoreML", or "CPU" (CoreML only when it takes every node).
     // For the startup summary. The CoreML text also names the model format that worked, e.g.
     // "CoreML MLProgram (315/315 nodes)". When CoreML was tried but didn't work, "CPU" is
     // followed by the reason, e.g. "CPU (CoreML could only take 100/120 nodes)".
