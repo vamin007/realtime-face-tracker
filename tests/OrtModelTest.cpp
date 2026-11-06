@@ -1,3 +1,6 @@
+// Tests for OrtModel against the real YOLO model: its input shape, running it on the CPU and on
+// CoreML, the output tensor's shape, and the error for a missing file. The model tests skip
+// themselves when the model file isn't in models/ (see scripts/export_yolo.sh).
 #include <gtest/gtest.h>
 
 #include <filesystem>
@@ -26,6 +29,8 @@ TEST(OrtModel, Yolo16by9ModelShapesOnCpu) {
     EXPECT_EQ(out[0].total(), 84u * 5040);  // (4 box values + 80 class scores) per candidate
 }
 
+// Passes only if CoreML took the whole graph: otherwise OrtModel reports "CPU (...)" and the
+// backend text wouldn't start with "CoreML".
 TEST(OrtModel, Yolo16by9ModelRunsOnCoreML) {
     const std::string path = kModels + "yolov8n_384x640.onnx";
     if (!std::filesystem::exists(path)) GTEST_SKIP() << "missing " << path;
@@ -39,9 +44,12 @@ TEST(OrtModel, Yolo16by9ModelRunsOnCoreML) {
     ASSERT_EQ(out.size(), 1u);
     ASSERT_EQ(out[0].dims, 3);
     EXPECT_EQ(out[0].size[1], 84);    // 4 box values + 80 class scores
+    // 5040 candidate boxes = 48x80 + 24x40 + 12x20 grid cells (the model looks at the image at
+    // strides of 8, 16 and 32 pixels).
     EXPECT_EQ(out[0].size[2], 5040);  // candidate boxes for a 384x640 input
 }
 
+// The error points the user at the script that downloads the models.
 TEST(OrtModel, MissingFileHasAHelpfulError) {
     try {
         OrtModel model(kModels + "nope.onnx", Backend::Cpu, kCache);

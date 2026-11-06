@@ -1,3 +1,16 @@
+// The entry point and the per-frame loop that wires the whole pipeline together:
+//
+//   Camera            a capture thread that keeps only the newest frame
+//   -> Detector       YOLO (people, GPU / Neural Engine) and YuNet (faces, CPU), side by side
+//   -> Tracker        one Kalman filter per track, Hungarian matching of detections to tracks
+//   -> TargetSelector marks the face a red laser dot is on as the TARGET
+//   -> Recognizer     names faces taught from photos (embeddings computed on a worker thread)
+//   -> Overlay        draws boxes and tags in the window; optionally records or saves frames
+//      Logger         writes one CSV row per visible track per frame
+//
+// main() first runs any one-off command (--list-labels, --enroll, --sync-labels, ...), which
+// exits without tracking. Otherwise it builds the pipeline, runs the loop until the video ends,
+// the user quits (q / Esc) or presses Ctrl-C, and prints a per-stage latency summary.
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -37,21 +50,28 @@ namespace fs = std::filesystem;
 namespace {
 
 std::atomic<bool> gStop{false};  // set by Ctrl-C; the loop ends cleanly and the log is complete
+// The SIGINT handler only sets the flag (an atomic, so that is safe inside a signal handler);
+// the loop checks it once per frame.
 void onInterrupt(int) { gStop = true; }
 
+// Strips leading and trailing spaces and tabs (for the entries of --classes).
 std::string trim(const std::string& s) {
     const auto first = s.find_first_not_of(" \t");
     if (first == std::string::npos) return "";
     return s.substr(first, s.find_last_not_of(" \t") - first + 1);
 }
 
-// What --classes asked for.
+// What --classes asked for. `detect` is passed to Detector::detect (so detectors that can't
+// produce a requested class don't run); `labelOnly` and `labels` then hide the tracks that
+// weren't asked for.
 struct ClassFilter {
     std::set<ClassId> detect;     // classes to detect; empty = all
     std::set<ClassId> labelOnly;  // base classes requested only through a label
     std::set<int> labels;         // requested labels (indices into the library)
 
     // Asking for "me" detects faces but shows only the face recognized as me.
+    // So: a track whose base class wasn't restricted is always shown; a restricted one is
+    // shown only when the recognizer has given it one of the requested labels.
     bool shows(const Track& t, const ClassRegistry& classes, const Recognizer* recognizer) const {
         if (!labelOnly.count(classes.base(t.classId))) return true;
         const int label = recognizer ? recognizer->labelOf(t.id) : -1;
@@ -59,6 +79,9 @@ struct ClassFilter {
     }
 };
 
+// Parses the --classes list (e.g. "person,face" or "face,alex") against the registry. Each name
+// is a built-in class (detected and shown) or a custom label (detects its base class, shows only
+// faces recognized as that label). Throws on an unknown name. An empty list means everything.
 ClassFilter resolveClasses(const std::string& csv, const ClassRegistry& classes,
                            const LabelLibrary& library) {
     ClassFilter filter;
@@ -85,12 +108,15 @@ ClassFilter resolveClasses(const std::string& csv, const ClassRegistry& classes,
             explicitClasses.insert(id);
         }
     }
+    // "--classes face,alex" asks for all faces as well, so a label doesn't restrict them.
     for (ClassId id : explicitClasses) filter.labelOnly.erase(id);
     return filter;
 }
 
 // Adds one detector. A model given with a flag must load; a default one that
 // fails is skipped with a warning so the other detectors still run.
+// `make` is a factory returning the new detector; it throws if the model can't be loaded
+// (a template parameter so each call can pass its own lambda).
 template <typename Make>
 void addDetector(Detector& detector, const ModelPath& model, Make make) {
     try {
@@ -101,6 +127,9 @@ void addDetector(Detector& detector, const ModelPath& model, Make make) {
     }
 }
 
+// Creates the YOLO (people) detector and, unless --no-faces, the face detector, and adds them to
+// `detector`. Throws if none could be loaded. The face detector's thresholds are
+// {confidence, low = 0.1, NMS = 0.3}; YOLO keeps the default low (0.1) and NMS (0.45).
 void buildDetectors(Detector& detector, const Options& opt, const ClassRegistry& classes) {
     detector.setParallel(opt.parallel);
     addDetector(detector, opt.yoloModel, [&] {
@@ -126,6 +155,8 @@ std::string detectorNames(const std::vector<std::string>& names) {
 }
 
 // Makes each saved label a class (so --classes and the overlay know its name).
+// Every label is a refinement of "face". One whose name can't be registered (say, it clashes
+// with an existing class) is reported and left out; the rest still work.
 void registerLabels(const LabelLibrary& library, ClassRegistry& classes) {
     for (const CustomLabel& label : library.labels()) {
         try {
@@ -136,6 +167,9 @@ void registerLabels(const LabelLibrary& library, ClassRegistry& classes) {
     }
 }
 
+// --dump-detections: appends one CSV row per raw detection of this frame (before tracking), in
+// the columns main() wrote as the header. keypoints is "x y x y ..." in frame pixels, empty for
+// people. tools/replay.cpp reads these files to re-run the tracker without the neural networks.
 void dumpDetections(std::ofstream& out, long long frame, double tMs,
                     const std::vector<Detection>& detections, const ClassRegistry& classes) {
     for (const Detection& d : detections) {
@@ -152,6 +186,7 @@ void dumpDetections(std::ofstream& out, long long frame, double tMs,
 
 // Faces with the laser dot on them now, or the TARGET: they look unlike
 // themselves, so recognition doesn't photograph them for their label.
+// Returns track ids.
 std::set<int> litFaces(const TargetSelector& targeting) {
     std::set<int> lit;
     for (const auto& [id, f] : targeting.faces())
@@ -161,12 +196,18 @@ std::set<int> litFaces(const TargetSelector& targeting) {
 }
 
 // "Face network: off: needs other faces (0 of 20 seen); ...".
+// The face network is a small neural network trained on the labels' face embeddings (see
+// FaceNet.h); it stays off until there is enough data, and recognition then uses the labels'
+// photos alone.
 void printFaceNet(const std::string& status) {
     std::cout << "Face network: " << status;
     if (status.rfind("on", 0) != 0) std::cout << "; recognition uses the photos alone";
     std::cout << '\n';
 }
 
+// --dump-laser: appends one CSV row per face the laser search looked at this frame, with what it
+// found (dot position, size and color measures; see LaserDot), and whether that face is the
+// TARGET. A developer aid for checking the laser search on recorded clips.
 void dumpLaser(std::ofstream& out, long long frame, double tMs, const TargetSelector& targeting) {
     for (const auto& [id, f] : targeting.faces()) {
         if (!f.checked) continue;  // not looked at this frame
@@ -181,9 +222,13 @@ void dumpLaser(std::ofstream& out, long long frame, double tMs, const TargetSele
 
 }  // namespace
 
+// The function-try-block turns any exception thrown below (bad option, missing model, camera
+// failure, ...) into an "Error: ..." line and exit code 1.
 int main(int argc, char** argv) try {
     // OpenCV's DNN module prints a warning about compute targets on every launch.
     cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_ERROR);
+    // PROJECT_DIR is the source folder, baked in by CMake, so models/, logs/ and labels/ are
+    // found wherever the program is started from.
     Options opt = defaultOptions(PROJECT_DIR);
     if (!parseArgs(std::vector<std::string>(argv + 1, argv + argc), opt)) return 0;
 
@@ -191,6 +236,7 @@ int main(int argc, char** argv) try {
     LabelLibrary library(opt.labelsDir);
     library.load();  // label folders (ones made by an older version are converted)
 
+    // One-off commands that need no detectors or camera: do the job and exit.
     if (opt.listClasses) {
         registerLabels(library, classes);
         for (ClassId id = 0; id < classes.size(); ++id) std::cout << classes.name(id) << '\n';
@@ -228,7 +274,10 @@ int main(int argc, char** argv) try {
                                  " didn't load (see the warning above). A sync needs it, or "
                                  "photos would be recorded as showing no face; nothing was "
                                  "changed.");
+    // SFace: turns an aligned face crop into an embedding (a vector of numbers) such that two
+    // photos of the same person score a high similarity. Labels store embeddings of their photos.
     FaceEmbedder faceEmbedder(opt.faceIdModel.path);  // loaded on first use
+    // The label commands that do need the face detector (to find faces in photos):
     if (!opt.enrollName.empty()) {
         enroll(opt.enrollName, opt.enrollPhotos, detector, classes, faceEmbedder, library,
                opt.addPhotos);
@@ -264,12 +313,17 @@ int main(int argc, char** argv) try {
         for (const LabelFolder& f : library.folders())
             if (!f.problem.empty())
                 std::cout << "Label '" << f.name << "' can't be used: " << f.problem << '\n';
+    // From here on this is a tracking run: the labels become classes (after the sync, so new
+    // labels are included), and --classes is resolved against them.
     registerLabels(library, classes);
 
     std::cout << "Detectors (" << (opt.parallel ? "side by side" : "one after another") << "):\n";
     for (const std::string& line : detector.summary()) std::cout << "  " << line << '\n';
     const ClassFilter filter = resolveClasses(opt.classes, classes, library);
 
+    // Recognition exists only when there are labels to recognize. The Recognizer embeds face
+    // crops on a worker thread and gives tracks their label names; the Reinforcer takes
+    // automatic photos of recognized faces and keeps other faces for the face network.
     // The reinforcer outlives the recognizer, which hands it the last faces it kept.
     std::unique_ptr<Reinforcer> reinforcer;
     std::unique_ptr<Recognizer> recognizer;
@@ -290,6 +344,8 @@ int main(int argc, char** argv) try {
                    "as auto_*.jpg; --no-auto-photos turns them off)\n";
     }
 
+    // The input: a camera (asked for 1280x720; the size it actually gives is used from here on)
+    // or a video file. Both are read through the same Camera interface.
     Camera camera;
     const bool opened = opt.video.empty() ? camera.openDevice(opt.camera, 1280, 720)
                                           : camera.openFile(opt.video, opt.realtime);
@@ -303,6 +359,8 @@ int main(int argc, char** argv) try {
                 camera.frameSize().width, camera.frameSize().height, camera.fps(),
                 opt.realtime ? " (realtime)" : "");
 
+    // Optional outputs: the CSV run log and the developer dumps (their header rows are
+    // written here, the rows in the loop).
     std::unique_ptr<Logger> logger;
     if (opt.log) {
         logger = std::make_unique<Logger>(opt.logDir);
@@ -329,6 +387,8 @@ int main(int argc, char** argv) try {
     }
     if (!opt.saveFrames.empty()) fs::create_directories(opt.saveFrames);
 
+    // The per-frame stages after detection. The tracker needs the frame size to tell a box cut
+    // off by the frame edge (an object leaving) from one that merely disappeared.
     Tracker tracker(classes);
     tracker.setFrameSize(camera.frameSize());
     TargetSelector targeting(classes, opt.target);
@@ -336,6 +396,8 @@ int main(int argc, char** argv) try {
     if (opt.window) cv::namedWindow(window, cv::WINDOW_NORMAL);
     std::signal(SIGINT, onInterrupt);
 
+    // Loop state. steady_clock never jumps (unlike the wall clock), so it is the right clock
+    // for measuring durations.
     using Clock = std::chrono::steady_clock;
     const auto start = Clock::now();
     auto lastFrame = start;
@@ -343,6 +405,8 @@ int main(int argc, char** argv) try {
     long long frameIndex = 0;
     cv::Mat frame;
     double tMs = 0;
+    // What the overlay shows; the t / d / h keys change it while running. The target and
+    // recognizer pointers are null when those features are off.
     DrawOptions draw;
     draw.trails = opt.showTrail;
     draw.debug = opt.debug;
@@ -352,15 +416,19 @@ int main(int argc, char** argv) try {
     cv::Mat raw;  // the frame before drawing, to redraw it while paused
     double drawMs = 0;
     auto uptime = [&] { return std::chrono::duration<double>(Clock::now() - start).count(); };
-    // Running totals for the summary at the end.
+    // Running totals for the summary at the end. `latency` keeps every frame's time per stage
+    // for the mean and 95th percentile.
     double detectMsTotal = 0, drawMsTotal = 0;
     std::map<std::string, double> detectorMsTotal;
     LatencyStats latency;
+    // Milliseconds elapsed since `t`.
     auto msSince = [](Clock::time_point t) {
         return std::chrono::duration<double, std::milli>(Clock::now() - t).count();
     };
+    // The tracks --classes lets through, refilled each frame (only when a label filter is set).
     std::vector<Track> filtered;
 
+    // --record: writes the raw camera feed to a video file, to replay later with --video.
     cv::VideoWriter recorder;
     if (!opt.record.empty()) {
         // H.264 where the system offers it (AVFoundation on macOS), else MPEG-4.
@@ -374,6 +442,11 @@ int main(int argc, char** argv) try {
         std::cout << "Recording the raw feed to " << opt.record << '\n';
     }
 
+    // The main loop, one iteration per frame, in pipeline order: read -> (record, mirror) ->
+    // detect -> track -> target + recognize -> filter -> log -> draw -> save / show -> keys.
+    // camera.read() blocks until a new frame is ready, so the loop runs at the speed of the
+    // slower of the camera and the processing; it ends when the file runs out, --max-frames is
+    // reached, Ctrl-C is pressed or the user quits.
     while (!gStop && (opt.maxFrames == 0 || frameIndex < opt.maxFrames) &&
            camera.read(frame, tMs)) {
         const auto frameStart = Clock::now();
@@ -382,8 +455,11 @@ int main(int argc, char** argv) try {
         // Recorded as the camera delivers it (not mirrored), like a QuickTime recording,
         // so it plays back with --video exactly as it was seen.
         if (recorder.isOpened()) recorder.write(frame);
+        // Flipping in place is fine: a threaded Camera gives each frame its own buffer and never
+        // writes to it again.
         if (opt.mirror && camera.isLive()) cv::flip(frame, frame, 1);
 
+        // Stage 1, detection: people and faces for this frame, in frame pixels.
         const auto t0 = Clock::now();
         const auto detections = detector.detect(frame, filter.detect);
         const double detectMs = msSince(t0);
@@ -392,9 +468,12 @@ int main(int argc, char** argv) try {
         for (const auto& t : detector.timings()) detectorMsTotal[t.name] += t.ms;
         if (dump.is_open()) dumpDetections(dump, frameIndex, tMs, detections, classes);
 
+        // Stage 2, tracking: match detections to tracks. The tracker works in seconds, so the
+        // frame's time (ms) is converted, and its Kalman filters advance by real elapsed time.
         const auto t1 = Clock::now();
         tracker.update(detections, tMs / 1000.0);
         latency.add("track", msSince(t1));
+        // Stage 3, laser targeting and face recognition, both reading the clean frame.
         const auto t2 = Clock::now();
         // Targeting looks for the laser's colors and recognition copies crops:
         // both happen before anything is drawn on the frame. Targeting goes
@@ -406,6 +485,8 @@ int main(int argc, char** argv) try {
         if (laserDump.is_open()) dumpLaser(laserDump, frameIndex, tMs, targeting);
         latency.add("labels+target", msSince(t2));
 
+        // `shown`: the tracks that are drawn and logged. Normally all of them; with a label in
+        // --classes, only those that pass the filter (see ClassFilter::shows).
         const std::vector<Track>* shown = &tracker.tracks();
         if (!filter.labelOnly.empty()) {
             filtered.clear();
@@ -417,12 +498,15 @@ int main(int argc, char** argv) try {
             logger->log(frameIndex, tMs, *shown, classes, opt.targeting ? &targeting : nullptr,
                         recognizer.get());
 
-        // Smoothed FPS so the number doesn't flicker.
+        // Smoothed FPS so the number doesn't flicker (an exponential moving average: each
+        // frame counts for 10%).
         const auto now = Clock::now();
         const double instant = 1.0 / std::chrono::duration<double>(now - lastFrame).count();
         lastFrame = now;
         fps = fps == 0.0 ? instant : 0.9 * fps + 0.1 * instant;
 
+        // Stage 4, drawing. drawMs shown on screen is the previous frame's (this one isn't
+        // drawn yet). The clean frame is kept in `raw` first so pause can redraw it.
         FrameInfo info{fps, detector.timings(), drawMs, uptime()};
         info.recording = recorder.isOpened();
         if (opt.window) frame.copyTo(raw);
@@ -431,6 +515,7 @@ int main(int argc, char** argv) try {
         drawMs = std::chrono::duration<double, std::milli>(Clock::now() - d0).count();
         drawMsTotal += drawMs;
         latency.add("draw", drawMs);
+        // --save-frames: every Nth annotated frame as a numbered JPEG.
         if (!opt.saveFrames.empty() && frameIndex % opt.saveEvery == 0) {
             char name[32];
             std::snprintf(name, sizeof(name), "/frame_%06lld.jpg", frameIndex);
@@ -440,9 +525,13 @@ int main(int argc, char** argv) try {
         if (opt.window) {
             const auto t4 = Clock::now();
             cv::imshow(window, frame);
+            // waitKey(1) is also what lets the window repaint and collects a key press (-1 if
+            // none); it waits at most 1 ms.
             int key = cv::waitKey(1);
             latency.add("display", msSince(t4));
             toScreen = ageMs + msSince(frameStart);
+            // Pause: keep redrawing the clean frame (so view toggles show up at once) until p,
+            // q, Esc (27) or Ctrl-C. Detection and tracking don't run meanwhile.
             if (key == 'p') {  // pause on this frame until p again; t, d and h still work
                 info.paused = true;
                 do {
@@ -457,15 +546,20 @@ int main(int argc, char** argv) try {
             applyViewKey(key, draw);
             if (key == 27 || key == 'q') break;
         }
+        // End-to-end latency: from when the camera captured the frame to when it was on screen
+        // (or, with no window, when the loop was done with it).
         latency.add("capture to screen", toScreen >= 0 ? toScreen : ageMs + msSince(frameStart));
         ++frameIndex;
     }
 
+    // After the loop: close the window and print the run summary.
     if (opt.window) cv::destroyAllWindows();
     const double seconds = std::chrono::duration<double>(Clock::now() - start).count();
     std::printf("Processed %lld frames in %.1f s (%.1f FPS)\n", frameIndex, seconds,
                 seconds > 0 ? frameIndex / seconds : 0.0);
     if (frameIndex > 0) {
+        // Detection per frame is the whole detect() call (about the slower detector when they
+        // run in parallel); the brackets give each detector's own mean.
         std::printf("Detection per frame: %.1f ms (", detectMsTotal / frameIndex);
         const char* sep = "";
         for (const auto& [name, ms] : detectorMsTotal) {
@@ -477,6 +571,7 @@ int main(int argc, char** argv) try {
         std::printf("Latency per frame, ms (mean/95th percentile): %s\n",
                     latency.summary().c_str());
     }
+    // Frames the camera thread overwrote before the loop picked them up (see Camera).
     if (camera.dropped() > 0)
         std::printf("Skipped %lld frames that arrived while busy\n", camera.dropped());
     return 0;

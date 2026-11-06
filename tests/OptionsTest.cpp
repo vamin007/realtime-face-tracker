@@ -1,3 +1,6 @@
+// Tests for command-line parsing (Options.cpp): the defaults, number checking and error
+// messages, the label commands (--enroll, --add-photos, --sync-labels, --rename-label), model
+// flags, rejected misuse, and options that were removed with features that no longer exist.
 #include <gtest/gtest.h>
 
 #include <stdexcept>
@@ -6,6 +9,7 @@
 
 namespace {
 
+// Parses `args` (without the program name) on top of the defaults for a fake project folder.
 Options parse(const std::vector<std::string>& args) {
     Options opt = defaultOptions("/project");
     parseArgs(args, opt);
@@ -24,6 +28,8 @@ TEST(Options, Defaults) {
     EXPECT_FLOAT_EQ(opt.confFace, 0.6f);
 }
 
+// Bad numbers (text, out of range, trailing characters) and a flag missing its value are errors;
+// --conf sets both detectors' thresholds at once.
 TEST(Options, NumbersAreChecked) {
     EXPECT_FLOAT_EQ(parse({"--conf-face", "0.5"}).confFace, 0.5f);
     EXPECT_THROW(parse({"--conf", "abc"}), std::runtime_error);
@@ -35,6 +41,7 @@ TEST(Options, NumbersAreChecked) {
     EXPECT_FLOAT_EQ(all.confFace, 0.3f);
 }
 
+// The message names the flag and the accepted range, so the user can fix the command.
 TEST(Options, ErrorMessagesSayWhatWasExpected) {
     try {
         parse({"--conf", "abc"});
@@ -46,6 +53,7 @@ TEST(Options, ErrorMessagesSayWhatWasExpected) {
     }
 }
 
+// Bare arguments are photos for --enroll; they are an error anywhere else.
 TEST(Options, EnrollTakesANameAndPhotos) {
     const Options opt = parse({"--enroll", "alex", "a.jpg", "b.jpg"});
     EXPECT_EQ(opt.enrollName, "alex");
@@ -74,6 +82,7 @@ TEST(Options, LabelCommands) {
     EXPECT_THROW(parse({"--rename-label", "alex"}), std::runtime_error);  // no new name
 }
 
+// --no-auto-photos only stops the automatic photos; recognition itself stays on.
 TEST(Options, AutoPhotosAreOnUnlessTurnedOff) {
     EXPECT_TRUE(parse({}).autoPhotos);
     const Options opt = parse({"--no-auto-photos"});
@@ -81,12 +90,14 @@ TEST(Options, AutoPhotosAreOnUnlessTurnedOff) {
     EXPECT_TRUE(opt.labels) << "recognition stays on";
 }
 
+// A model named with a flag must load (explicitlySet); a default one that fails is just skipped.
 TEST(Options, ModelFlagsMarkTheModelAsRequired) {
     const Options opt = parse({"--model", "other.onnx"});
     EXPECT_EQ(opt.yoloModel.path, "other.onnx");
     EXPECT_TRUE(opt.yoloModel.explicitlySet);
 }
 
+// Unknown flags, a camera run with no window and no way to stop, and bad flag values.
 TEST(Options, MisuseIsRejected) {
     EXPECT_THROW(parse({"--frobnicate"}), std::runtime_error);
     EXPECT_THROW(parse({"--no-window"}), std::runtime_error);  // camera with no way to stop

@@ -1,3 +1,8 @@
+// Tests for the detection stage that need no camera: decodeYolo() on hand-built model outputs
+// (box scaling back to frame pixels, NMS of duplicates, weak vs strong detections, reading only
+// the person score, clipping), the link between YoloDetector's person id and ClassRegistry's,
+// a check of the real YOLO model's class count (skipped when the model file is absent), and
+// Detector's list of loaded detectors.
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -26,6 +31,7 @@ private:
 };
 
 // Builds a fake YOLOv8 output [1, 4 + classes, boxes] from (cx, cy, w, h, class, score).
+// Each box has a score for one class only (all its other scores are 0).
 struct FakeBox {
     float cx, cy, w, h;
     int cls;
@@ -47,6 +53,7 @@ cv::Mat fakeYoloOutput(int numClasses, const std::vector<FakeBox>& boxes) {
     return out;
 }
 
+// The first detection whose weak flag equals `weak`, or null.
 const Detection* findWeak(const std::vector<Detection>& dets, bool weak) {
     const auto it =
         std::find_if(dets.begin(), dets.end(), [&](const Detection& d) { return d.weak == weak; });
@@ -55,6 +62,8 @@ const Detection* findWeak(const std::vector<Detection>& dets, bool weak) {
 
 }  // namespace
 
+// The model reports center + size in its input pixels; with the frame shrunk by `scale` into the
+// input, dividing by the scale gives the frame's top-left corner + size.
 TEST(DecodeYolo, ScalesBoxesBackToFramePixels) {
     const cv::Mat out = fakeYoloOutput(3, {{100, 50, 40, 20, kCocoPerson, 0.9f}});
     const auto dets = decodeYolo(out, 0.5f, {1280, 720}, {0.4f});
@@ -67,6 +76,8 @@ TEST(DecodeYolo, ScalesBoxesBackToFramePixels) {
     EXPECT_FALSE(dets[0].weak);
 }
 
+// NMS drops the lower-scoring of two overlapping boxes; a score between the low and the main
+// threshold survives but is flagged weak; below the low threshold it is dropped.
 TEST(DecodeYolo, MergesDuplicatesAndMarksWeakDetections) {
     const cv::Mat out =
         fakeYoloOutput(3, {
@@ -112,6 +123,7 @@ TEST(DecodeYolo, APersonScoreCountsWhateverElseTheBoxScores) {
     EXPECT_FLOAT_EQ(dets[0].conf, 0.5f);
 }
 
+// A box hanging over the frame edge is cut to the frame (here at the top-left corner).
 TEST(DecodeYolo, ClipsBoxesToTheFrame) {
     const cv::Mat out = fakeYoloOutput(1, {{5, 5, 40, 40, 0, 0.9f}});
     const auto dets = decodeYolo(out, 1.0f, {100, 100}, {0.4f});
@@ -142,6 +154,8 @@ TEST(YoloDetector, TheModelHasTheCocoClasses) {
     EXPECT_THROW(other.detect(frame), std::runtime_error);
 }
 
+// main() uses the names to see whether the face detector loaded; they come out in the order the
+// detectors were added.
 TEST(Detector, NamesTheDetectorsThatLoaded) {
     Detector detector;
     EXPECT_TRUE(detector.names().empty());

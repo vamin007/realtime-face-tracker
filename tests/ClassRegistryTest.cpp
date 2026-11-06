@@ -1,9 +1,12 @@
+// Tests for ClassRegistry: the two built-in classes and their ids, safe handling of invalid ids
+// and names, and custom labels (a recognized person's name layered on "face").
 #include <gtest/gtest.h>
 
 #include <stdexcept>
 
 #include "ClassRegistry.h"
 
+// person must be id 0 (YOLO's person index) and face id 1; nothing else is registered by default.
 TEST(ClassRegistry, TheTrackersClassesArePersonAndFace) {
     const ClassRegistry classes;
     EXPECT_EQ(classes.size(), 2);
@@ -19,6 +22,7 @@ TEST(ClassRegistry, TheTrackersClassesArePersonAndFace) {
     EXPECT_EQ(classes.find("cell phone"), -1);
 }
 
+// Lookups never read out of range; they return "unknown" / -1.
 TEST(ClassRegistry, InvalidIdsAreSafe) {
     const ClassRegistry classes;
     EXPECT_EQ(classes.name(-1), "unknown");
@@ -26,6 +30,8 @@ TEST(ClassRegistry, InvalidIdsAreSafe) {
     EXPECT_EQ(classes.find("unicorn"), -1);
 }
 
+// A custom label has its own id and name but reports "face" as its base class; names must be
+// unique, and a label can only sit on a valid built-in class (not on another label).
 TEST(ClassRegistry, CustomLabelRefinesItsBaseClass) {
     ClassRegistry classes;
     const ClassId face = classes.face();

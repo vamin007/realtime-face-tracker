@@ -1,3 +1,6 @@
+// Command-line parsing: defaults, the --help text and the argument loop. Hand-written (no
+// argument-parsing library); every bad input throws a readable std::runtime_error, which
+// main() prints as "Error: ...". See Options.h.
 #include "Options.h"
 
 #include <iostream>
@@ -6,6 +9,9 @@
 
 namespace {
 
+// Parses `text` as a float in [lo, hi] for `flag`, or throws a message naming the flag.
+// std::stof alone would accept "0.5x" (it stops at the first bad character), so it also
+// requires that the whole string was used.
 float parseFloat(const std::string& flag, const std::string& text, float lo, float hi) {
     size_t used = 0;
     float value = 0;
@@ -22,6 +28,7 @@ float parseFloat(const std::string& flag, const std::string& text, float lo, flo
     return value;
 }
 
+// The whole-number version of parseFloat, with the same checks.
 long long parseInt(const std::string& flag, const std::string& text, long long lo, long long hi) {
     size_t used = 0;
     long long value = 0;
@@ -41,6 +48,7 @@ long long parseInt(const std::string& flag, const std::string& text, long long l
 
 }  // namespace
 
+// Everything that isn't a plain default in Options.h is a path derived from projectDir.
 Options defaultOptions(const std::string& projectDir) {
     const std::string models = projectDir + "/models/";
     Options opt;
@@ -50,11 +58,13 @@ Options defaultOptions(const std::string& projectDir) {
     opt.faceModel = {models + "face_detection_yunet_2023mar.onnx"};
     opt.faceIdModel = {models + "face_recognition_sface_2021dec.onnx"};
     opt.logDir = projectDir + "/logs";
+    // Where OrtModel keeps CoreML's compiled copies of the models.
     opt.cacheDir = projectDir + "/.cache/coreml";
     opt.labelsDir = projectDir + "/labels";
     return opt;
 }
 
+// The --help text. Keep it in step with the flags in parseArgs().
 void printUsage() {
     std::cout
         << "Usage: tracker [options]\n"
@@ -112,6 +122,7 @@ void printUsage() {
 bool parseArgs(const std::vector<std::string>& args, Options& opt) {
     for (size_t i = 0; i < args.size(); ++i) {
         const std::string& arg = args[i];
+        // Consumes and returns the flag's value (the next argument), or throws if it's missing.
         auto next = [&]() -> std::string {
             if (i + 1 >= args.size()) throw std::runtime_error("Missing value for " + arg);
             return args[++i];
@@ -127,6 +138,7 @@ bool parseArgs(const std::vector<std::string>& args, Options& opt) {
         else if (arg == "--debug") opt.debug = true;
         else if (arg == "--record") opt.record = next();
         else if (arg == "--no-log") opt.log = false;
+        // --conf sets both detectors' thresholds; the next two set one each.
         else if (arg == "--conf") opt.confYolo = opt.confFace = parseFloat(arg, next(), 0, 1);
         else if (arg == "--conf-yolo") opt.confYolo = parseFloat(arg, next(), 0, 1);
         else if (arg == "--conf-face") opt.confFace = parseFloat(arg, next(), 0, 1);
@@ -151,6 +163,7 @@ bool parseArgs(const std::vector<std::string>& args, Options& opt) {
         } else if (arg == "--no-labels") opt.labels = false;
         else if (arg == "--no-auto-photos") opt.autoPhotos = false;
         else if (arg == "--labels-dir") opt.labelsDir = next();
+        // Naming a model makes failing to load it an error (ModelPath::explicitlySet).
         else if (arg == "--model") opt.yoloModel = {next(), true};
         else if (arg == "--face-model") opt.faceModel = {next(), true};
         else if (arg == "--max-frames") opt.maxFrames = parseInt(arg, next(), 1, 100000000);
@@ -172,6 +185,9 @@ bool parseArgs(const std::vector<std::string>& args, Options& opt) {
             throw std::runtime_error("Unknown option: " + arg + " (see --help)");
         }
     }
+    // Checks that need the whole command line: photos belong to --enroll / --add-photos, which
+    // in turn need photos; and without a window a camera run has no quit key, so it needs
+    // --max-frames (a video ends by itself).
     if (!opt.enrollPhotos.empty() && opt.enrollName.empty())
         throw std::runtime_error("Unexpected argument '" + opt.enrollPhotos.front() +
                                  "' (photos go with --enroll NAME)");
