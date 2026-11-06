@@ -1,3 +1,7 @@
+// Reinforcement implementation: the photo gates and helpers, NegativeStore and its file, the
+// training-data and status helpers behind --sync-labels and --list-labels, and the Reinforcer's
+// background thread. The overview and the threading rules are in Reinforcement.h.
+
 #include "Reinforcement.h"
 
 #include <algorithm>
@@ -12,6 +16,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
+// Version of .negatives.yml; a file of another version is ignored (NegativeStore::load).
 constexpr int kFormat = 1;
 constexpr int kJpegQuality = 95;
 
@@ -29,9 +34,12 @@ std::string describeNet(const FaceNet& net) {
            std::to_string(net.otherPeople()) + " people)";
 }
 
+// Status when there was enough data but the networks couldn't learn it (two labels of the same
+// face, say).
 const char* kCantLearn = "off: it couldn't learn to tell the faces apart";
 
-// The highest similarity of a sample of `image` to a sample of any other photo.
+// The highest similarity of a sample of `image` to a sample of any other photo. A high value
+// means the photo duplicates another, so dropping it loses little (see photoToReplace).
 float redundancy(const CustomLabel& label, const std::string& image) {
     float most = -1;
     for (const LabelSample& s : label.samples) {
@@ -45,15 +53,20 @@ float redundancy(const CustomLabel& label, const std::string& image) {
 }  // namespace
 
 CaptureGate capturePolicy(const CaptureInput& in, const CaptureParams& p) {
+    // One gate per line, in CaptureGate order; the first one to fail is the reason reported.
     if (!in.enabled) return CaptureGate::Off;
     if (in.streak < p.minStreak) return CaptureGate::Unstable;
     if (!in.detected) return CaptureGate::NotDetected;
     if (in.width < p.minWidth) return CaptureGate::TooSmall;
     if (in.lit) return CaptureGate::Lit;
+    // lastPhoto is -1 until the first photo (0 is a real time: the start of a video).
     if (in.lastPhoto >= 0 && in.now - in.lastPhoto < p.interval) return CaptureGate::TooSoon;
+    // A bare match isn't enough, since a wrong photo would teach the label the wrong face: the
+    // score must clear the threshold by scoreLead and the runner-up by minMargin.
     if (in.score < in.threshold + p.scoreLead) return CaptureGate::LowScore;
     if (in.score - in.runnerUp < p.minMargin) return CaptureGate::CloseRunnerUp;
     if (in.sharpness < p.minSharpness) return CaptureGate::Blurry;
+    // A view too like one the label already has adds nothing.
     if (in.similarity > p.maxSimilarity) return CaptureGate::NotNew;
     return CaptureGate::Take;
 }
@@ -89,12 +102,15 @@ const char* describe(CaptureGate gate) {
 float sharpness(const cv::Mat& image, const cv::Rect2f& face) {
     const cv::Rect r = cv::Rect(face) & cv::Rect(0, 0, image.cols, image.rows);
     if (r.area() <= 0) return 0;
+    // Gray, and scaled to 112 x 112 (the size a face is embedded at), so the score doesn't depend
+    // on the face's color or its size in the frame.
     cv::Mat gray, small, laplacian;
     if (image.channels() == 3) cv::cvtColor(image(r), gray, cv::COLOR_BGR2GRAY);
     else gray = image(r);
     cv::resize(gray, small, {112, 112}, 0, 0, cv::INTER_AREA);
     cv::Laplacian(small, laplacian, CV_32F);
     cv::Scalar mean, deviation;
+    // The variance is the standard deviation squared. Only the middle of the face is measured.
     cv::meanStdDev(laplacian(cv::Rect(22, 22, 68, 68)), mean, deviation);  // the middle 60%
     return static_cast<float>(deviation[0] * deviation[0]);
 }
@@ -115,6 +131,7 @@ int autoPhotoCount(const CustomLabel& label) {
 std::string photoToReplace(const CustomLabel& label, int maxPhotos) {
     if (autoPhotoCount(label) <= maxPhotos) return "";
     std::string drop;
+    // -2 is below any similarity (the lowest is -1), so the first candidate always wins.
     float most = -2;
     for (const LabelSample& s : label.samples) {
         if (s.flipped || !isAutoPhotoName(s.image)) continue;
@@ -139,7 +156,8 @@ void NegativeStore::add(const Embedding& e, const std::string& source) {
     faces_.push_back(e);
     sources_.push_back(source);
     if (static_cast<int>(faces_.size()) <= capacity_) return;
-    // Full: the face most like another one adds the least.
+    // Full: the face most like another one adds the least. (Quadratic in the number of faces, but
+    // there are at most capacity + 1, and this runs on the reinforcer's thread.)
     size_t drop = 0;
     float most = -2;
     for (size_t i = 0; i < faces_.size(); ++i) {
@@ -170,6 +188,7 @@ bool NegativeStore::load(const std::string& file, const std::string& model) {
         in["faces"] >> faces;
         std::vector<std::string> sources;
         in["sources"] >> sources;
+        // One row per face and one source name per row; anything else means a damaged file.
         if (faces.empty() || faces.type() != CV_32F ||
             faces.rows != static_cast<int>(sources.size()))
             return false;
@@ -182,6 +201,7 @@ bool NegativeStore::load(const std::string& file, const std::string& model) {
         std::cerr << "Warning: can't read " << file << "; other faces are collected again\n";
         return false;
     }
+    // A file saved with a larger capacity: keep the newest faces (they are stored oldest first).
     while (static_cast<int>(faces_.size()) > capacity_) {
         faces_.erase(faces_.begin());
         sources_.erase(sources_.begin());
@@ -190,6 +210,7 @@ bool NegativeStore::load(const std::string& file, const std::string& model) {
 }
 
 void NegativeStore::save(const std::string& file, const std::string& model) const {
+    // Atomic write: a temp file, then a rename over the old file, as for the label caches.
     const std::string temp = file + ".tmp.yml";
     {
         cv::FileStorage out(temp, cv::FileStorage::WRITE);
@@ -197,6 +218,7 @@ void NegativeStore::save(const std::string& file, const std::string& model) cons
         out.writeComment("Written by the tracker: embeddings (not photos) of faces that matched");
         out.writeComment("no label, which teach the face network what other people look like.");
         out.writeComment("Delete it to forget them.");
+        // All faces as one float matrix, a row each.
         cv::Mat faces(static_cast<int>(faces_.size()),
                       faces_.empty() ? 0 : static_cast<int>(faces_[0].size()), CV_32F);
         for (size_t i = 0; i < faces_.size(); ++i)
@@ -247,6 +269,7 @@ std::string trainFaceNet(const LabelLibrary& library, const std::string& model) 
     if (const std::string why = FaceNet::shortfall(data); !why.empty()) return "off: " + why;
     const std::string file = (fs::path(library.dir()) / kFaceNetFile).string();
     FaceNet net;
+    // A saved network trained on exactly this data (same fingerprint) is reused.
     if (net.load(file) && net.trainedOn(data)) return describeNet(net);
     if (!net.train(data)) return kCantLearn;
     net.save(file);
@@ -257,13 +280,18 @@ std::string trainFaceNet(const LabelLibrary& library, const std::string& model) 
 
 Reinforcer::Reinforcer(std::string labelsDir, FaceNetData labels)
     : dir_(std::move(labelsDir)), labels_(std::move(labels)) {
+    // The caller's `others` are ignored: this object keeps the other faces itself (store_).
     labels_.others.clear();
+    // run_ names this run: faces handed over in it are stored under "<run> #<n>", so tracks of
+    // different runs count as different people.
     const std::time_t now = std::time(nullptr);
     char stamp[32];
     std::strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", std::localtime(&now));
     run_ = stamp;
     store_.load((fs::path(dir_) / kNegativesFile).string(), labels_.model);
     others_ = static_cast<int>(store_.faces().size());
+    // Reuse the saved network if it was trained on exactly the current photos and kept faces;
+    // otherwise train now.
     auto saved = std::make_shared<FaceNet>();
     if (saved->load((fs::path(dir_) / kFaceNetFile).string()) && saved->trainedOn(data()))
         publish(saved, describeNet(*saved));
@@ -330,6 +358,8 @@ void Reinforcer::work() {
             std::unique_lock<std::mutex> lock(mutex_);
             wake_.wait(lock, [this] { return stop_ || !queue_.empty(); });
             if (queue_.empty()) return;  // stopped, and nothing left to do
+            // Takes everything queued at once and works without the lock. The network is retrained
+            // once per batch, however many tasks it holds.
             tasks.swap(queue_);
             busy_ = true;
         }
@@ -351,6 +381,7 @@ void Reinforcer::work() {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             busy_ = false;
+            // store_ belongs to this thread; others() reads this copy of its size.
             others_ = static_cast<int>(store_.faces().size());
         }
         idle_.notify_all();
@@ -359,6 +390,8 @@ void Reinforcer::work() {
 
 bool Reinforcer::run(Task& task) {
     if (!task.photo) {
+        // All faces handed over from one track share a source name, which is how the store counts
+        // people.
         const std::string source = run_ + " #" + std::to_string(++tracks_);
         for (const Embedding& e : task.others) store_.add(e, source);
         store_.save((fs::path(dir_) / kNegativesFile).string(), labels_.model);
@@ -372,13 +405,16 @@ bool Reinforcer::run(Task& task) {
     if (!cv::imwrite(temp.string(), p.image, {cv::IMWRITE_JPEG_QUALITY, kJpegQuality}))
         throw std::runtime_error("can't write " + temp.string());
     fs::rename(temp, path);
+    // Delete the automatic photo that made room for this one (its record is dropped just below).
     if (!p.replaces.empty()) {
         std::error_code ec;
         fs::remove(folder / p.replaces, ec);
     }
+    // So the next sync finds the photo already looked at instead of embedding it again.
     if (!appendPhotoRecord(p.folder, p.record, p.replaces))
         std::cerr << "Warning: " << path.string()
                   << " isn't in the label's .embeddings.yml; the next sync looks at it\n";
+    // The samples to train on now include this photo (the Recognizer added it in memory already).
     labels_ = std::move(task.labels);
     labels_.others.clear();
     return true;
@@ -394,6 +430,7 @@ FaceNetData Reinforcer::data() const {
 void Reinforcer::retrain() {
     const FaceNetData d = data();
     if (const std::string why = FaceNet::shortfall(d); !why.empty()) {
+        // Publishing null turns the network off; the status says why.
         publish(nullptr, "off: " + why);
         return;
     }
@@ -403,6 +440,7 @@ void Reinforcer::retrain() {
         return;
     }
     try {
+        // Saved for the next start. A failure only means it is trained again then.
         net->save((fs::path(dir_) / kFaceNetFile).string());
     } catch (const std::exception& e) {
         std::cerr << "Warning: " << e.what() << " (the face network is used, but not saved)\n";
@@ -416,5 +454,6 @@ void Reinforcer::publish(std::shared_ptr<const FaceNet> net, std::string status)
         net_ = std::move(net);
         status_ = std::move(status);
     }
+    // After the swap, so a reader that sees the new version finds the new network and status.
     ++version_;
 }

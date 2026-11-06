@@ -1,6 +1,9 @@
 // Reinforcement: when a recognized face is photographed for its label, what
 // happens to the photo, the faces of other people, and how the face network
 // changes recognition. Synthetic embeddings and frames, so it runs in moments.
+// Sections: the capture gates (capturePolicy) one by one, automatic photo names and replacement,
+// NegativeStore, the network's relax and veto rules (combineMatch), and end-to-end tests that
+// run a Recognizer and a Reinforcer over fake tracks and check the files they write.
 
 #include <gtest/gtest.h>
 
@@ -110,6 +113,9 @@ int imagesUnder(const fs::path& dir) {
     return n;
 }
 
+// Fixture: a temp labels directory, a fake embedder that reads the "code" painted into each
+// frame, and helpers that run a Recognizer and a Reinforcer over synthetic tracks, one frame per
+// second of fake time.
 class ReinforcementTest : public testing::Test {
 protected:
     void SetUp() override {
@@ -416,6 +422,7 @@ TEST(NegativeStore, SavedAndLoadedForOneEmbeddingModel) {
 
 // --- How the network changes recognition ------------------------------------
 
+// combineMatch(): `probs` is the network's answer, a probability per label and then "other".
 TEST(NetworkRule, AcceptsAFaceJustBelowTheThresholdWhenItsSure) {
     RecognizerParams p;
     LabelMatch m;  // the gallery: alex is closest, but below the threshold
@@ -761,6 +768,8 @@ TEST_F(ReinforcementTest, ANewPhotoRetrainsTheNetwork) {
     EXPECT_EQ(saved.samples(), 8);
 }
 
+// The --sync-labels and --list-labels path: trainFaceNet() and faceNetStatus() work from the saved
+// files, with no Recognizer running.
 TEST_F(ReinforcementTest, SyncLabelsTrainsTheNetworkAndSaysWhyItsOff) {
     makeLabel("alex", views(alex, 3, rng, 0.2f));
     library.load();

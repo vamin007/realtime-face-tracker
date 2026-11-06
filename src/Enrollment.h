@@ -1,3 +1,7 @@
+// Label management, on the command line and at startup: syncing label folders with their photos
+// (finding each face, embedding it and caching the result), enrolling photos, listing, renaming
+// and removing labels. These run on the main thread before tracking starts. They do the slow work
+// (face detection and embedding of photos) so that recognition doesn't have to.
 #pragma once
 #include <string>
 #include <vector>

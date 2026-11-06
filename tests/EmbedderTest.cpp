@@ -1,3 +1,7 @@
+// Embedder basics: similarity of unit vectors, mirroring a face box and its landmarks, and the
+// SFace model (loaded on first use; the part that needs the model is skipped if it isn't
+// downloaded, see scripts/fetch_models.sh).
+
 #include <gtest/gtest.h>
 
 #include <filesystem>
@@ -21,6 +25,7 @@ cv::Mat testFrame() {
 
 }  // namespace
 
+// For length-1 vectors the dot product is the cosine similarity.
 TEST(Embedder, SimilarityOfUnitVectors) {
     EXPECT_FLOAT_EQ(similarity({1, 0}, {1, 0}), 1);
     EXPECT_FLOAT_EQ(similarity({1, 0}, {0, 1}), 0);

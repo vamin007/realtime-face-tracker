@@ -1,5 +1,7 @@
 // Saves frames of a video as JPEG photos, e.g. to try face labels with
 // photos taken from the reference clips instead of personal pictures.
+// A developer tool: it is built as its own executable (grab_frames), isn't part of the tracker,
+// and only needs the face detector.
 //
 // Usage: grab_frames VIDEO OUTDIR [--every S] [--start S] [--end S] [--count N]
 //                    [--crop face] [--prefix NAME]
@@ -37,6 +39,7 @@ void usage() {
 }  // namespace
 
 int main(int argc, char** argv) try {
+    // Quiet OpenCV's own logging so the output is just the photos saved.
     cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_ERROR);
     if (argc < 3) {
         usage();
@@ -46,6 +49,7 @@ int main(int argc, char** argv) try {
     double every = 2, start = 0, end = 1e9;
     long count = 1000000;
     std::string cropClass, prefix = "frame";
+    // Options come as "--name value" pairs after the two positional arguments.
     for (int i = 3; i < argc; ++i) {
         const std::string arg = argv[i];
         if (i + 1 >= argc) throw std::runtime_error("Missing value for " + arg);
@@ -66,6 +70,9 @@ int main(int argc, char** argv) try {
         if (cropClass != "face")
             throw std::runtime_error("--crop takes face (labels are faces), not '" + cropClass +
                                      "'");
+        // The tracker's YuNet face model, with thresholds conf 0.6, low 0.1 and NMS 0.3
+        // (non-maximum suppression: boxes overlapping more than that are duplicates). Frames
+        // wider than 640 px are scaled down for detection.
         faces =
             std::make_unique<FaceDetector>(PROJECT_DIR "/models/face_detection_yunet_2023mar.onnx",
                                            kFace, DetectorThresholds{0.6f, 0.1f, 0.3f}, 640);
@@ -74,17 +81,22 @@ int main(int argc, char** argv) try {
     cv::VideoCapture cap(video);
     if (!cap.isOpened()) throw std::runtime_error("Can't open " + video);
     fs::create_directories(outDir);
+    // A frame's time is its index over the FPS (30 if the file doesn't say).
     const double fps = cap.get(cv::CAP_PROP_FPS) > 0 ? cap.get(cv::CAP_PROP_FPS) : 30;
+    // `next`: the video time (s) at which the next photo is due.
     double next = start;
     long saved = 0, searched = 0;  // searched: frames a face was looked for in
     cv::Mat frame;
     for (long index = 0; saved < count && cap.read(frame); ++index) {
         const double t = index / fps;
         if (t > end) break;
+        // Not due yet. (The tiny epsilon absorbs floating-point error in index / fps.)
         if (t + 1e-9 < next) continue;
         cv::Mat photo = frame;
         if (faces) {
             ++searched;
+            // The most prominent confident face (confidence times area); weak detections are
+            // skipped.
             const Detection* best = nullptr;
             const auto detections = faces->detect(frame);
             for (const Detection& d : detections)
@@ -92,6 +104,8 @@ int main(int argc, char** argv) try {
                     best = &d;
             if (!best) continue;  // try the next frame
             const cv::Rect2f& b = best->box;
+            // The face box grown by kCropMargin on every side, clipped to the frame: a
+            // portrait-style photo.
             const cv::Rect area =
                 cv::Rect(cv::Rect2f(b.x - b.width * kCropMargin, b.y - b.height * kCropMargin,
                                     b.width * (1 + 2 * kCropMargin),

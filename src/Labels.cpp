@@ -1,3 +1,7 @@
+// Implementation of the label library: reading and writing label.yml and .embeddings.yml (both
+// YAML, through cv::FileStorage), planning a sync from the cache, loading labels, and matching a
+// face against them. The overview of the folder layout is in Labels.h.
+
 #include "Labels.h"
 
 #include <algorithm>
@@ -15,7 +19,10 @@ namespace fs = std::filesystem;
 
 namespace {
 
+// A label's score is the mean similarity of this many of its closest samples.
 constexpr int kTopSamples = 3;
+// Version written into .embeddings.yml. A file of any other version counts as missing (readCache
+// returns false), so its photos are looked at again.
 constexpr int kCacheFormat = 2;  // format 1 kept the embeddings in label.yml
 
 std::string lower(std::string s) {
@@ -29,12 +36,16 @@ std::string trim(const std::string& s) {
     return s.substr(first, s.find_last_not_of(" \t\r\n") - first + 1);
 }
 
+// Modification time in nanoseconds on the filesystem's clock. It is only ever compared with a
+// value read earlier from the same file, so the clock's epoch doesn't matter.
 long long mtimeOf(const fs::path& path) {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
                fs::last_write_time(path).time_since_epoch())
         .count();
 }
 
+// An embedding stored as a float matrix. Empty if it's missing or not float, which makes
+// readCache treat the photo as unusable instead of failing.
 Embedding readEmbedding(const cv::FileNode& node) {
     if (node.empty()) return {};
     cv::Mat m;
@@ -60,12 +71,16 @@ std::string objectLabelProblem(const LabelSettings& settings, const LabelCache& 
 }
 
 // The cache that holds a label's samples. The class is face, written as an
-// earlier version reads it: not set in label.yml.
+// earlier version reads it: not set in label.yml. A photo's original and flipped
+// samples are folded back into one record. For save() and migrateOldLabel().
 LabelCache cacheOf(const CustomLabel& label, const fs::path& folder) {
     LabelCache cache{label.model, kFaceClass, true, false, {}};
     for (const LabelSample& s : label.samples) {
         auto r = std::find_if(cache.photos.begin(), cache.photos.end(),
                               [&](const PhotoRecord& r) { return r.file.name == s.image; });
+        // A photo's first sample starts its record; size and mtime come from the file now, which is
+        // what the next sync compares to tell whether the photo changed. Its flipped sample fills
+        // in `mirrored`.
         if (r == cache.photos.end()) {
             PhotoRecord record;
             record.file.name = s.image;
@@ -110,6 +125,8 @@ float labelScore(const CustomLabel& label, const Embedding& e) {
     for (const LabelSample& s : label.samples) sims.push_back(similarity(s.embedding, e));
     if (sims.empty()) return 0;
     const size_t k = std::min<size_t>(kTopSamples, sims.size());
+    // partial_sort puts the k largest first and leaves the rest unordered, which is all that's
+    // needed.
     std::partial_sort(sims.begin(), sims.begin() + k, sims.end(), std::greater<float>());
     float sum = 0;
     for (size_t i = 0; i < k; ++i) sum += sims[i];
@@ -146,6 +163,7 @@ bool isAutoPhotoName(const std::string& fileName) {
 
 std::vector<PhotoFile> listPhotos(const std::string& folder) {
     std::vector<PhotoFile> photos;
+    // The error_code overload keeps an unreadable folder from throwing: it just lists nothing.
     std::error_code ec;
     for (const auto& entry : fs::directory_iterator(folder, ec)) {
         const std::string name = entry.path().filename().string();
@@ -173,6 +191,7 @@ LabelSettings readSettings(const std::string& file) {
     }
     if (!hasSettings) return s;
 
+    // Malformed YAML may make OpenCV throw or open nothing; both become the same readable error.
     cv::FileStorage yaml;
     try {
         yaml.open(text.str(),
@@ -182,6 +201,7 @@ LabelSettings readSettings(const std::string& file) {
     if (!yaml.isOpened() || !yaml.root().isMap())
         throw std::runtime_error(
             file + " isn't readable; write one setting per line, e.g. threshold: 0.45");
+    // Only known keys are accepted, so a typo such as "treshold" is reported, not silently ignored.
     for (const cv::FileNode& node : yaml.root()) {
         const std::string key = node.name();
         if (key == "threshold") {
@@ -232,6 +252,7 @@ bool readCache(const std::string& file, LabelCache& cache) {
     if (!fs::exists(file)) return false;
     try {
         cv::FileStorage in(file, cv::FileStorage::READ);
+        // A file of any other format version counts as no cache: every photo is looked at again.
         if (!in.isOpened() || static_cast<int>(in["format"]) != kCacheFormat) return false;
         in["model"] >> cache.model;
         in["class"] >> cache.baseClass;
@@ -247,6 +268,8 @@ bool readCache(const std::string& file, LabelCache& cache) {
             r.file.mtime = mtime;
             r.used = static_cast<int>(node["used"]) != 0;
             node["note"] >> r.note;
+            // Only used photos have a box, confidence and embeddings stored; the others keep just
+            // the note.
             if (r.used) {
                 node["roi"] >> r.roi;
                 r.conf = static_cast<float>(node["conf"]);
@@ -266,7 +289,9 @@ bool readCache(const std::string& file, LabelCache& cache) {
 
 void writeCache(const std::string& file, const LabelCache& cache) {
     // Written next to it, then renamed over it: an interrupted sync never
-    // leaves half a file. (The .yml extension tells OpenCV to write YAML.)
+    // leaves half a file. (The .yml extension tells OpenCV to write YAML.) rename() is atomic
+    // within one filesystem, so a reader sees the old file or the new one. The braces below end
+    // the FileStorage's life, which is what flushes and closes the file before the rename.
     const std::string temp = file + ".tmp.yml";
     {
         cv::FileStorage out(temp, cv::FileStorage::WRITE);
@@ -282,6 +307,7 @@ void writeCache(const std::string& file, const LabelCache& cache) {
                 << "mtime" << static_cast<int64_t>(r.file.mtime) << "used" << (r.used ? 1 : 0)
                 << "note" << r.note;
             if (r.used) {
+                // cv::Mat(vector, false) views the vector's memory instead of copying it.
                 out << "roi" << r.roi << "conf" << r.conf << "embedding"
                     << cv::Mat(r.embedding, false);
                 if (!r.mirrored.empty()) out << "mirrored" << cv::Mat(r.mirrored, false);
@@ -297,9 +323,13 @@ bool appendPhotoRecord(const std::string& folder, PhotoRecord record, const std:
     const std::string file = (fs::path(folder) / kCacheFile).string();
     LabelCache cache;
     if (!readCache(file, cache)) return false;
+    // Size and mtime are taken from the file as it is now, so the next sync sees this photo as
+    // unchanged and doesn't embed it again.
     const fs::path photo = fs::path(folder) / record.file.name;
     record.file.size = static_cast<long long>(fs::file_size(photo));
     record.file.mtime = mtimeOf(photo);
+    // Drop any older record of this photo and the record of the photo it replaces, then keep the
+    // list sorted by name, as a sync writes it.
     cache.photos.erase(std::remove_if(cache.photos.begin(), cache.photos.end(),
                                       [&](const PhotoRecord& r) {
                                           return r.file.name == record.file.name ||
@@ -329,6 +359,8 @@ SyncPlan planSync(const LabelCache& cache, const std::vector<PhotoFile>& photos,
         plan.reason = "the embedding model changed";
     }
 
+    // Cached but gone from the folder: removed. In the folder but not cached: new. Cached with a
+    // different size or mtime: changed. Anything else is still valid and is kept as it is.
     for (const PhotoRecord& r : cache.photos) {
         const bool present = std::any_of(photos.begin(), photos.end(),
                                          [&](const PhotoFile& p) { return p.name == r.file.name; });
@@ -346,6 +378,7 @@ SyncPlan planSync(const LabelCache& cache, const std::vector<PhotoFile>& photos,
             plan.keep.push_back(*r);
         }
     }
+    // A redo discards the cached records: they were made differently, so every photo is looked at.
     if (plan.redoAll) {
         plan.look = photos;
         plan.keep.clear();
@@ -361,6 +394,7 @@ int LabelFolder::usedPhotos() const {
 bool migrateOldLabel(const std::string& folder) {
     const fs::path dir(folder), file = dir / kSettingsFile;
     if (!fs::exists(file)) return false;
+    // The old format: one label.yml holding the model, threshold and every sample's embedding.
     CustomLabel label;
     std::string baseClass;
     try {
@@ -394,6 +428,7 @@ bool migrateOldLabel(const std::string& folder) {
     LabelCache cache = cacheOf(label, dir);
     cache.baseClass = baseClass;
     cache.wholePhoto = wholePhoto;
+    // Keep the old file before label.yml is overwritten below with the new, settings-only one.
     fs::copy_file(file, dir / kOldLabelBackup, fs::copy_options::overwrite_existing);
     writeCache((dir / kCacheFile).string(), cache);
     writeSettings(file.string(), {label.threshold});
@@ -416,6 +451,8 @@ void LabelLibrary::load() {
     }
     std::sort(dirs.begin(), dirs.end());
     std::sort(loosePhotos_.begin(), loosePhotos_.end());
+    // Every folder gets a LabelFolder (what --list-labels and the sync report show), even one that
+    // can't be a label. Only folders with usable photos also become a CustomLabel in labels_.
     for (const fs::path& path : dirs) {
         LabelFolder f;
         f.name = path.filename().string();
@@ -425,6 +462,8 @@ void LabelLibrary::load() {
         try {
             if (const std::string why = labelNameProblem(f.name); !why.empty())
                 throw std::runtime_error(why + "; rename the folder");
+            // Converts an old-format label.yml (embeddings inside) in place; does nothing
+            // otherwise.
             migrateOldLabel(f.path);
             f.settings = readSettings((path / kSettingsFile).string());
         } catch (const std::exception& e) {
@@ -439,6 +478,8 @@ void LabelLibrary::load() {
             folders_.push_back(std::move(f));
             continue;
         }
+        // The model isn't checked here (empty): load() has no embedder. A sync passes the real
+        // model id and redoes every photo if it changed.
         f.plan = planSync(f.cache, f.photos, "");
 
         // The label as the last sync left it.
@@ -496,6 +537,8 @@ bool LabelLibrary::needsSync() const {
 }
 
 LabelMatch LabelLibrary::match(const Embedding& e, float defaultThreshold, float minMargin) const {
+    // One pass keeps the best score and the runner-up: a new best demotes the old best to
+    // runner-up. The runner-up is never below 0, so a lone label is compared with 0.
     LabelMatch best;
     float bestScore = -1;
     for (size_t i = 0; i < labels_.size(); ++i) {
@@ -513,6 +556,7 @@ LabelMatch LabelLibrary::match(const Embedding& e, float defaultThreshold, float
     best.score = bestScore;
     const CustomLabel& label = labels_[best.label];
     const float threshold = label.threshold > 0 ? label.threshold : defaultThreshold;
+    // No match (-1) if below the threshold or too close to the runner-up; `best` stays set.
     if (best.score < threshold || best.score - best.runnerUp < minMargin) best.label = -1;
     return best;
 }
@@ -528,6 +572,7 @@ std::vector<PhotoAgreement> photoAgreement(const CustomLabel& label) {
             sum += similarity(s.embedding, other.embedding);
             ++n;
         }
+        // A lone photo has nothing to disagree with, so it reports 1.
         result.push_back({s.image, n ? sum / n : 1});
     }
     return result;
@@ -550,6 +595,8 @@ LabelConfusion labelConfusion(const CustomLabel& a, const CustomLabel& b, float 
         ++c.photos;
         c.ownScore += own;
         c.otherScore += other;
+        // Ambiguous: b alone would be accepted, and a doesn't lead it by `margin` (the recognizer's
+        // rule).
         if (other >= threshold && own - other < margin) ++c.ambiguous;
     }
     if (c.photos > 0) {

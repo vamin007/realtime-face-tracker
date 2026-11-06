@@ -1,3 +1,16 @@
+// Reinforcement: how the tracker improves itself while it runs, and the data behind it.
+//   - capturePolicy(): the gates a recognized face has to pass before it is photographed for its
+//     label. A pure function, so each gate is unit-tested on its own.
+//   - sharpness(), maxSimilarity(), photoToReplace(), autoPhotoName(): helpers for those gates and
+//     for keeping a label's automatic photos to a fixed number.
+//   - NegativeStore: embeddings of faces that matched no label, kept as the "other people"
+//     examples the face network (FaceNet.h) trains on.
+//   - Reinforcer: a background thread that writes the photos, collects those embeddings and
+//     retrains the face network, so the tracking loop never waits for disk or training.
+//
+// Threading: the tracking thread (Recognizer) decides what to photograph and queues the work. The
+// Reinforcer's thread does all file writes and training, on copies of the data, and publishes each
+// trained network as a shared_ptr<const FaceNet> that is never modified afterwards.
 #pragma once
 #include <atomic>
 #include <condition_variable>
@@ -52,7 +65,8 @@ struct CaptureInput {
     double lastPhoto = -1;  // s, when the label's last photo was; -1: none yet
 };
 
-// Whether to take the photo, or the first reason not to.
+// Whether to take the photo, or the first reason not to. The gates are checked in the order
+// listed.
 enum class CaptureGate {
     Take,
     Off,
@@ -75,6 +89,8 @@ const char* describe(CaptureGate gate);  // "taken", "too soon", ...
 // image. On hands_face.mov, clear faces measured 19-200 (median 71), a hand
 // sweeping across the face 9.5; over the whole box that hand measured 45, among
 // clear but smooth faces (35-48), hence the middle only. 15 is the threshold.
+// (The Laplacian is an edge filter, a second derivative: sharp detail gives large and varied
+// responses, blur gives flat ones, so the variance of its output measures focus.)
 float sharpness(const cv::Mat& image, const cv::Rect2f& face);
 // The highest similarity of e to any of the label's samples.
 float maxSimilarity(const CustomLabel& label, const Embedding& e);
@@ -99,7 +115,8 @@ struct OtherFaceParams {
 
 // Other people's faces: embeddings only, never photos, in labels/.negatives.yml.
 // Each face remembers the track it came from, so it's known how many people
-// they show (roughly: one person can be several tracks).
+// they show (roughly: one person can be several tracks). These are the negatives for FaceNet's
+// "other" output: examples of "none of the labels".
 class NegativeStore {
 public:
     static constexpr int kCapacity = 500;
@@ -119,6 +136,7 @@ public:
 private:
     int capacity_;
     std::vector<Embedding> faces_;
+    // sources_[i] is the track faces_[i] came from.
     std::vector<std::string> sources_;
 };
 
@@ -140,7 +158,8 @@ std::string trainFaceNet(const LabelLibrary& library, const std::string& model);
 // again whenever they change. It gets copies of what it needs (a photo, the
 // labels' samples), so it never reads the labels the tracking thread uses, and
 // it hands each newly trained network over whole: net() is never changed once
-// returned.
+// returned. The public methods are safe to call from the tracking thread: they only queue work
+// or read what the thread last published.
 class Reinforcer {
 public:
     // Loads the network saved in labelsDir if it was trained on exactly these
@@ -170,24 +189,33 @@ public:
     void wait();                                 // until everything queued is done
 
 private:
+    // One unit of queued work: a photo to save (with every label's samples, to train on), or the
+    // faces kept from one track of someone who isn't a label.
     struct Task {
         bool photo = false;
         Photo shot;
         FaceNetData labels;
         std::vector<Embedding> others;
     };
+    // The thread's body: takes everything queued, does it, and retrains once if anything changed.
     void work();
+    // Does one task: saves a photo and its record, or stores the faces.
     bool run(Task& task);  // true if the network should be trained again
+    // Trains on data(), saves the network and publishes it (or why it's off).
     void retrain();
+    // The training data now: the labels' samples as of the last photo, plus every kept face.
     FaceNetData data() const;
+    // Swaps in a new network and status under the mutex, then bumps version_.
     void publish(std::shared_ptr<const FaceNet> net, std::string status);
 
     const std::string dir_;
     FaceNetData labels_;   // this thread's copy
     NegativeStore store_;  // used by the thread only (and before it starts)
     std::string run_;      // names this run's tracks in the store
+    // Tracks handed over so far this run; numbers the next source name.
     int tracks_ = 0;
 
+    // mutex_ guards the queue, the flags and what is published (net_, status_, others_).
     mutable std::mutex mutex_;
     std::condition_variable wake_, idle_;
     std::deque<Task> queue_;
@@ -196,6 +224,8 @@ private:
     std::shared_ptr<const FaceNet> net_;
     std::string status_;
     int others_ = 0;
+    // Counts publications, so the Recognizer notices a new network with one atomic read instead of
+    // taking the mutex every frame.
     std::atomic<int> version_{0};
     std::thread thread_;
 };

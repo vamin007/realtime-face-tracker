@@ -1,3 +1,7 @@
+// Label library basics, with no models: label names, scoring and matching of embeddings, sync
+// planning (planSync), reading and writing label.yml and .embeddings.yml, photo file names, and
+// the photo-agreement and label-confusion checks. Embeddings are tiny hand-made vectors.
+
 #include <gtest/gtest.h>
 
 #include <filesystem>
@@ -7,6 +11,7 @@
 
 namespace {
 
+// A vector scaled to length 1, like a real embedding.
 Embedding unit(std::vector<float> v) {
     float n = 0;
     for (float x : v) n += x * x;
@@ -14,8 +19,10 @@ Embedding unit(std::vector<float> v) {
     return v;
 }
 
+// A label sample for a made-up photo (fixed name and box) with the given embedding direction.
 LabelSample sample(std::vector<float> v) { return {"photo.jpg", {1, 2, 3, 4}, false, unit(v)}; }
 
+// A label with the given samples, its own threshold unset (0: the default applies).
 CustomLabel makeLabel(const std::string& name, std::vector<LabelSample> samples) {
     return {name, "test-model", 0, std::move(samples)};
 }
@@ -31,6 +38,7 @@ TEST(Labels, NamesAreSafeForFoldersAndClasses) {
     EXPECT_FALSE(validLabelName("a,b"));
 }
 
+// "TARGET" is the tag on the red target box, so a label with that name would pass for it.
 TEST(Labels, TargetIsNotALabelNameInAnyCase) {
     EXPECT_FALSE(validLabelName("TARGET")) << "the red box's tag";
     EXPECT_FALSE(validLabelName("target"));
@@ -66,6 +74,7 @@ TEST(Labels, MatchNeedsTheThresholdAndAClearWinner) {
     EXPECT_EQ(LabelLibrary("unused").match(unit({1, 0, 0}), 0.5f, 0.05f).label, -1) << "no labels";
 }
 
+// LabelMatch::best is set even when nothing matched; the debug view shows that closest label.
 TEST(Labels, MatchNamesTheClosestLabelEvenWithoutAMatch) {
     LabelLibrary library("unused");
     library.labels() = {makeLabel("alex", {sample({1, 0, 0})}),
@@ -80,6 +89,8 @@ TEST(Labels, MatchNamesTheClosestLabelEvenWithoutAMatch) {
     EXPECT_EQ(LabelLibrary("unused").match(unit({1, 0, 0}), 0.5f, 0.05f).best, -1);
 }
 
+// What the Recognizer does for an automatic photo: its two samples join the label at once, with
+// no file involved.
 TEST(Labels, APhotosSamplesAreAddedAndRemovedInMemory) {
     LabelLibrary library("unused");
     library.labels() = {makeLabel("alex", {sample({1, 0})})};
@@ -104,6 +115,7 @@ TEST(Labels, APhotosSamplesAreAddedAndRemovedInMemory) {
     EXPECT_EQ(label.samples[0].image, "photo.jpg");
 }
 
+// save() then load() gives the label back, through label.yml and .embeddings.yml.
 TEST(Labels, SaveAndLoadRoundTrip) {
     const std::string dir = testing::TempDir() + "/labels_roundtrip";
     std::filesystem::remove_all(dir);
@@ -134,6 +146,8 @@ TEST(Labels, SaveAndLoadRoundTrip) {
 
 namespace {
 
+// Test data for planSync: a photo as the folder shows it, its record in the cache (used, with an
+// embedding), and a cache as this version writes it.
 PhotoFile file(const std::string& name, long long size = 100, long long mtime = 5) {
     return {name, size, mtime};
 }
@@ -171,6 +185,8 @@ TEST(Labels, PlanSyncFindsNewChangedAndRemovedPhotos) {
     EXPECT_EQ(same.keep.size(), 3u);
 }
 
+// A new embedding model, or what an earlier version made differently, makes the cached embeddings
+// useless: every photo is looked at again.
 TEST(Labels, PlanSyncRedoesEveryPhotoWhenWhatTheyWereMadeWithChanges) {
     const LabelCache cache = faceCache({record("a.jpg"), record("b.jpg")});
     const std::vector<PhotoFile> photos = {file("a.jpg"), file("b.jpg")};
@@ -280,6 +296,7 @@ TEST(Labels, AnEarlierVersionsSettingsAreReadButNotUsed) {
     std::filesystem::remove(path);
 }
 
+// Includes 64-bit sizes and times, and an unused photo, of which only the note is stored.
 TEST(Labels, CacheRoundTrip) {
     const std::string path = testing::TempDir() + "/label_cache.yml";
     LabelCache cache = faceCache({record("a.jpg", 123456789012LL, 1792070584123456789LL)});
@@ -332,6 +349,8 @@ TEST(Labels, AgreementComparesEachPhotoWithTheOtherPhotos) {
     EXPECT_NEAR(agreement[1].agreement, 0.5f, 1e-5) << "a (1) and a's mirrored copy (0)";
 }
 
+// "twin" is nearly the same face as "alex", so photos of alex are ambiguous between the two;
+// "sam" is clearly different.
 TEST(Labels, ConfusionFlagsLabelsThatLookAlike) {
     auto photos = [](std::vector<std::vector<float>> vectors) {
         std::vector<LabelSample> samples;
