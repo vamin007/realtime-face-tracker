@@ -14,14 +14,23 @@ every visible track.
   The filter smooths detection jitter, but a box snaps to its detection when the object moves faster than
   the filter expects (a head turned quickly), so it doesn't trail behind.
 - **TARGET:** when a red laser dot is on a face, that face gets a red box labeled `TARGET` (within about
-  0.1 s; released 0.3 s after the dot leaves). The dot must be on the face itself, not just inside its box:
-  the face's outline is an oval built from its landmarks (forehead to chin, cheek to cheek), and the pixels
-  around the dot must be that face's skin. A dot on the hair, an ear or the wall behind the head doesn't
-  count. Hands aren't detected, so a dot on a hand held in front of the face can't be told apart from one
-  on the face. A dot is judged against the face's own skin color: much redder and brighter, small and
-  round, often white in the middle. Flashlights, lamps, red lips and red clothes don't count. Only faces
-  can be targets, one at a time; the target follows the dot to another face (`--no-targeting` turns it
-  off; `--laser-redness N`, default 60, sets how much redder than the skin a dot must be).
+  0.13 s). It is released once the face has been seen without the dot for 0.3 s; while the face isn't
+  detected (a hand passing in front of it) it stays the target for up to 0.75 s. The dot must be on the
+  face itself, not just inside its box: the face's outline is an oval built from its landmarks (forehead
+  to chin, cheek to cheek), cut to the face's detection box, and the pixels around the dot must be that
+  face's skin. A dot on the hair, an ear, the neck or the wall behind the head doesn't count. When hands
+  cover the face its landmarks go astray, and the outline falls back to an oval inside the box. A laser
+  adds red light, so a dot is judged against the skin right around it: its red rises well above the
+  skin's and much more than its green and blue, it glows (brighter red than the skin around it, and not
+  darker in green or blue), and it is small and round. On brightly lit skin the red has less room to rise
+  below 255, so less is asked of it, and the dot must then be overexposed to white in the middle.
+  Flashlights, lamps, red lips, a red sticker or bindi, and red clothes don't count. Only faces can be
+  targets, one at a time; the target follows the dot to another face (`--no-targeting` turns it off;
+  `--laser-redness N`, default 35, sets how much more a dot's red must rise than its green and blue).
+  Known limits: hands aren't detected, so a dot on a hand held in front of the face can't be told apart
+  from one on the face (a hand covering the face often breaks its landmarks, which shrinks the outline to
+  the box: that only partly helps). On skin whose red is within about 20 of 255 (a very brightly lit
+  face), a laser can't be told apart by its red, so it isn't found there.
 
 `v3` is the people-only version (it also tracks hands; this branch doesn't). `v2` has every feature (all
 80 COCO classes, object labels), and was built following [PLAN.md](PLAN.md); `main` holds the original
@@ -49,7 +58,7 @@ ctest --test-dir build           # unit tests (needs googletest)
 ./build/tracker --video clips/hands_face.mov --no-window   # headless: just the log and a summary
 ./build/tracker --video clips/hands_face.mov --realtime    # play at camera speed, skipping frames when busy
 ./build/tracker --backend cpu                             # don't use CoreML
-./build/tracker --debug                                   # show confidences, light ratios, label scores and timings
+./build/tracker --debug                                   # show confidences, laser results, label scores and timings
 ./build/tracker --record clips/new.mov                    # also save the raw camera feed
 ./build/tracker --conf-face 0.5                           # per-detector thresholds: --conf-yolo/-face
 ./build/tracker --list-classes
@@ -90,7 +99,7 @@ Teach it a specific person's face from a few photos, so their face shows their n
 - `labels/` holds your photos and isn't committed to git.
 
 ## Logs
-Each run writes `logs/run_<date>_<time>.csv`: one row per visible track per frame. The columns are `time_ms`, `frame`, `id` (unique for the run), `number` (the one on screen), `class`, `label`, `matched` (0 = not detected this frame), the box, `conf`, `target`, `laser` (faces: how much redder than the skin the laser dot on it is; empty if none) and `coasting` (1 = drawn with corners only, as a prediction). To summarize one or more runs:
+Each run writes `logs/run_<date>_<time>.csv`: one row per visible track per frame. The columns are `time_ms`, `frame`, `id` (unique for the run), `number` (the one on screen), `class`, `label`, `matched` (0 = not detected this frame), the box, `conf`, `target`, `laser` (faces: how much more the red of the laser dot on it rose than its green and blue; empty if none) and `coasting` (1 = drawn with corners only, as a prediction). To summarize one or more runs:
 ```sh
 scripts/log_stats.py logs/run_*.csv
 ```
@@ -111,13 +120,21 @@ the eyes, or use a printed face photo or a mannequin head.
 
 To check it without a laser, draw synthetic dots onto a clip at places taken from the tracker's own face
 landmarks (cheek, forehead, nose: should be TARGET; the wall in the face's box, above the hairline, beside
-the head, the shirt: shouldn't), then run the tracker on the result:
+the head, the shirt, and a static red mark on the cheek: shouldn't), then run the tracker on the result.
+A dot is added as light (red saturates, green and blue rise a little, white in the middle when bright),
+the red mark as pigment (lit like the skin), and the clip is saved losslessly (FFV1, `.mkv`, about 0.5 GB)
+after subsampling the colors like a camera's video feed; a lossy re-encode washes out a dot's red rim.
 ```sh
 ./build/tracker --video clips/hands_face.mov --no-window --no-log --dump-detections /tmp/dets.csv
-.venv/bin/python scripts/make_laser_clip.py clips/hands_face.mov /tmp/dets.csv /tmp/laser.mp4 /tmp/schedule.csv
-./build/tracker --video /tmp/laser.mp4 --no-window --dump-laser /tmp/laser_dump.csv
+.venv/bin/python scripts/make_laser_clip.py clips/hands_face.mov /tmp/dets.csv /tmp/laser.mkv /tmp/schedule.csv
+./build/tracker --video /tmp/laser.mkv --no-window --dump-laser /tmp/laser_dump.csv
 ```
-`--dump-laser` writes, per face and frame, whether a dot was found, where, its size, its redness and how
+For `flashlight.mov` add `--plan flashlight`: its dots fall where the flashlight lights the face. The spots
+come from the landmarks the tracker itself uses, so the on-face results partly check the tracker against
+itself; only the box-corner spots don't depend on the landmarks.
+
+`--dump-laser` writes, per face and frame, whether a dot was found, where, its size, its redness (how much
+more its red rose than its green and blue), its glow (its brightest red above the skin around it) and how
 much of the ring around it is skin. To tune on a real laser, record a clip (`--record clips/laser.mov`)
 and look at that file for it.
 

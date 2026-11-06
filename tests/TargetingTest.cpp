@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <opencv2/imgproc.hpp>
 
 #include "Targeting.h"
@@ -13,9 +14,55 @@ const cv::Rect2f kFaceBox(540, 200, 200, 260);
 const std::vector<cv::Point2f> kLandmarks = {{600, 290}, {680, 290}, {640, 330}, {610, 380},
                                              {670, 380}};
 const cv::Scalar kRoom(120, 125, 115), kSkin(120, 150, 200), kHair(35, 40, 50), kLips(110, 110, 175);
+const cv::Scalar kBrightSkin(170, 185, 220);  // a flashlight on the face: red at 220
+const cv::Scalar kWall(150, 170, 205);        // a beige wall: as close to the skin as it gets
+// How much of the skin's light a red mark reflects (B, G, R): a red sticker or
+// a bindi, a fluorescent one, and a pink spot (a pimple) that is only redder.
+const cv::Vec3f kRedMark(0.35f, 0.30f, 1.25f), kFluorescentMark(0.35f, 0.30f, 1.6f),
+    kPinkSpot(1.0f, 1.0f, 1.3f);
+
+float toLinear(int v) { return std::pow(v / 255.0f, 2.2f); }
+uchar fromLinear(float v) {
+    return cv::saturate_cast<uchar>(255 * std::pow(std::min(std::max(v, 0.0f), 1.0f), 1 / 2.2f));
+}
+
+// Changes the light around `c` in linear light: light(d2) is added to each
+// channel times `add`, or the skin's light is multiplied by mix(d2) of `times`.
+template <typename F>
+void relight(cv::Mat& frame, cv::Point2f c, int r, F change) {
+    for (int y = std::max(0, static_cast<int>(c.y) - r);
+         y <= std::min(frame.rows - 1, static_cast<int>(c.y) + r); ++y)
+        for (int x = std::max(0, static_cast<int>(c.x) - r);
+             x <= std::min(frame.cols - 1, static_cast<int>(c.x) + r); ++x) {
+            cv::Vec3b& p = frame.at<cv::Vec3b>(y, x);
+            const float d2 = (x - c.x) * (x - c.x) + (y - c.y) * (y - c.y);
+            for (int ch = 0; ch < 3; ++ch) p[ch] = fromLinear(change(toLinear(p[ch]), ch, d2));
+        }
+}
+
+// A laser dot as a camera sees it: light added to the skin's, a narrow spot that
+// saturates red and, through the sensor's crosstalk, a little green and blue
+// (white in the middle when it's bright), plus a faint wide glow.
+void addLaser(cv::Mat& frame, cv::Point2f c, float strength, float sigma) {
+    const float crosstalk[3] = {0.05f, 0.08f, 1.0f};
+    relight(frame, c, 20, [&](float v, int ch, float d2) {
+        const float light =
+            strength * 25 * std::exp(-d2 / (2 * sigma * sigma)) + 0.12f * std::exp(-d2 / 50);
+        return v + light * crosstalk[ch];
+    });
+}
+
+// A red mark (pigment): lit like the skin around it, reflecting more red and
+// much less green and blue. Radius 4.5 px with a soft edge.
+void addMark(cv::Mat& frame, cv::Point2f c, cv::Vec3f reflectance) {
+    relight(frame, c, 7, [&](float v, int ch, float d2) {
+        const float cover = std::min(std::max(5.0f - std::sqrt(d2), 0.0f), 1.0f);
+        return v * (1 + cover * (reflectance[ch] - 1));
+    });
+}
 
 // A synthetic scene: a room, faces (skin shaped like a head, hair on top, red
-// lips), and laser dots: a red glow with an overexposed white middle.
+// lips), laser dots, and red marks.
 struct Scene {
     struct Face {
         cv::Rect2f box;
@@ -23,9 +70,10 @@ struct Scene {
     };
     std::vector<Face> faces = {{kFaceBox}};
     std::vector<std::pair<cv::Rect2f, cv::Scalar>> patches;  // drawn over the faces
-    std::vector<cv::Point> dots;
-    int dotRadius = 4;
-    cv::Scalar dotColor = cv::Scalar(40, 40, 235);
+    std::vector<cv::Point2f> dots;
+    float dotStrength = 1, dotSigma = 1.3f;
+    std::vector<cv::Point2f> marks;
+    cv::Vec3f markReflectance = kRedMark;
 
     cv::Mat render() const {
         cv::Mat frame(720, 1280, CV_8UC3, kRoom);
@@ -41,11 +89,10 @@ struct Scene {
             cv::ellipse(frame, c + cv::Point(0, static_cast<int>(f.box.height * 0.2f)),
                         {static_cast<int>(f.box.width * 0.15f), 7}, 0, 0, 360, kLips, cv::FILLED);
         }
-        for (const auto& [box, color] : patches) frame(cv::Rect(box)).setTo(color);
-        for (const cv::Point& d : dots) {
-            cv::circle(frame, d, dotRadius, dotColor, cv::FILLED, cv::LINE_AA);
-            cv::circle(frame, d, dotRadius / 2, cv::Scalar(250, 250, 255), cv::FILLED);
-        }
+        for (const auto& [box, color] : patches)
+            frame(cv::Rect(box) & cv::Rect(0, 0, frame.cols, frame.rows)).setTo(color);
+        for (const cv::Point2f& d : dots) addLaser(frame, d, dotStrength, dotSigma);
+        for (const cv::Point2f& m : marks) addMark(frame, m, markReflectance);
         return frame;
     }
 };
@@ -56,7 +103,7 @@ Track makeTrack(int id, ClassId cls, const cv::Rect2f& box,
     t.id = id;
     t.classId = cls;
     t.conf = 0.9f;
-    t.box = box;
+    t.box = t.detected = box;
     t.keypoints = keypoints;
     t.confirmed = t.visible = t.matched = true;
     return t;
@@ -69,8 +116,13 @@ std::vector<cv::Point2f> landmarksAt(const cv::Rect2f& box) {
     return moved;
 }
 
-LaserDot find(const Scene& scene) {
-    return findLaserDot(scene.render(), faceOval(kFaceBox, kLandmarks));
+// Landmarks YuNet gives when hands cover the face: eyes almost above each
+// other, the mouth far below them (eyes-to-mouth 2.9 eye distances).
+const std::vector<cv::Point2f> kCoveredLandmarks = {
+    {640, 250}, {648, 300}, {650, 340}, {640, 420}, {645, 425}};
+
+LaserDot find(const Scene& scene, const std::vector<cv::Point2f>& landmarks = kLandmarks) {
+    return findLaserDot(scene.render(), faceOval(kFaceBox, landmarks), kFaceBox);
 }
 
 class TargetingTest : public ::testing::Test {
@@ -98,7 +150,7 @@ TEST(FaceOval, FollowsTheLandmarksFromForeheadToChin) {
     const cv::RotatedRect oval = faceOval(kFaceBox, kLandmarks);
     EXPECT_NEAR(oval.center.x, 640, 1);
     EXPECT_NEAR(oval.size.width, 160, 1);  // cheek to cheek: twice the eye distance
-    EXPECT_NEAR(oval.size.height, 252, 1);  // eyes-to-mouth 90: 90 above, 72 below the mouth
+    EXPECT_NEAR(oval.size.height, 234, 1);  // eyes-to-mouth 90: 90 above, 54 below the mouth
     EXPECT_NEAR(oval.angle, 0, 0.5);
     // The box's corners (hair, background) are outside it (the oval isn't tilted).
     for (const cv::Point2f corner : {kFaceBox.tl(), kFaceBox.br(),
@@ -125,6 +177,20 @@ TEST(FaceOval, WithoutLandmarksItIsInsideTheBox) {
     EXPECT_LT(oval.size.height, kFaceBox.height);
 }
 
+// Hands over the face make YuNet's landmarks go astray; an oval from them would
+// be a sliver reaching off the face.
+TEST(FaceOval, LandmarksNotShapedLikeAFaceAreIgnored) {
+    const cv::RotatedRect fallback = faceOval(kFaceBox, {});
+    std::vector<cv::Point2f> squashed = kLandmarks;  // the mouth up at the nose
+    squashed[3].y = squashed[4].y = 320;
+    for (const auto& landmarks : {kCoveredLandmarks, squashed}) {
+        const cv::RotatedRect oval = faceOval(kFaceBox, landmarks);
+        EXPECT_EQ(oval.center, fallback.center);
+        EXPECT_EQ(oval.size, fallback.size);
+        EXPECT_EQ(oval.angle, fallback.angle);
+    }
+}
+
 TEST(LaserDot, ADotOnTheCheekIsFound) {
     Scene scene;
     scene.dots = {{685, 345}};
@@ -132,12 +198,13 @@ TEST(LaserDot, ADotOnTheCheekIsFound) {
     ASSERT_TRUE(dot.found);
     EXPECT_NEAR(dot.center.x, 685, 1.5);
     EXPECT_NEAR(dot.center.y, 345, 1.5);
-    EXPECT_GT(dot.redness, 60);
+    EXPECT_GT(dot.redness, 25);  // red rose this much more than green and blue
+    EXPECT_GE(dot.glow, 30);
     EXPECT_GT(dot.skinAround, 0.9f);
 }
 
 TEST(LaserDot, ADotOnTheForeheadNoseOrChinIsFound) {
-    for (const cv::Point p : {cv::Point(640, 275), cv::Point(640, 330), cv::Point(640, 425)}) {
+    for (const cv::Point p : {cv::Point(640, 275), cv::Point(640, 330), cv::Point(640, 412)}) {
         Scene scene;
         scene.dots = {p};
         EXPECT_TRUE(find(scene).found) << p;
@@ -145,13 +212,31 @@ TEST(LaserDot, ADotOnTheForeheadNoseOrChinIsFound) {
 }
 
 TEST(LaserDot, ADotInTheBoxButNotOnTheFaceIsIgnored) {
-    // The wall in the box's corners, the hair, and just past the cheek.
+    // The wall in the box's corners, the hair, just past the cheek, and the
+    // neck below the chin.
     for (const cv::Point p : {cv::Point(552, 212), cv::Point(728, 445), cv::Point(640, 215),
-                              cv::Point(600, 225), cv::Point(733, 330)}) {
+                              cv::Point(600, 225), cv::Point(733, 330), cv::Point(640, 452)}) {
         Scene scene;
         scene.dots = {p};
         EXPECT_FALSE(find(scene).found) << p;
     }
+}
+
+// Light only adds: on skin whose red is already at 220 a dot's red can rise by
+// 35 at most, far less than on the face in normal light.
+TEST(LaserDot, ADotOnBrightlyLitSkinIsFound) {
+    Scene scene;
+    scene.faces[0].skin = kBrightSkin;
+    for (const cv::Point p : {cv::Point(685, 345), cv::Point(640, 275), cv::Point(640, 330)}) {
+        scene.dots = {p};
+        EXPECT_TRUE(find(scene).found) << p;
+    }
+    scene.dots = {{685, 345}};
+    scene.dotStrength = 0.02f;  // too dim to turn white in the middle
+    EXPECT_TRUE(find(scene).found) << "a dim dot";
+    scene.faces[0].skin = cv::Scalar(190, 200, 232);  // red at 232: white in the middle
+    scene.dotStrength = 1;
+    EXPECT_TRUE(find(scene).found) << "very bright skin";
 }
 
 TEST(LaserDot, NoDotNoMatterHowTheFaceIsLit) {
@@ -173,18 +258,89 @@ TEST(LaserDot, RedThingsThatArentADotAreIgnored) {
     EXPECT_FALSE(find(scene).found) << "not round";
 }
 
+// A red mark the size of a dot (a bindi, a red sticker, a cherry angioma) is lit
+// like the skin around it: it doesn't glow, and it is darker in green and blue.
+TEST(LaserDot, AStaticRedMarkIsIgnored) {
+    for (const cv::Scalar skin : {kSkin, kBrightSkin}) {
+        for (const cv::Vec3f reflectance : {kRedMark, kFluorescentMark, kPinkSpot}) {
+            Scene scene;
+            scene.faces[0].skin = skin;
+            scene.marks = {{685, 345}};
+            scene.markReflectance = reflectance;
+            EXPECT_FALSE(find(scene).found) << "skin " << skin << " reflectance " << reflectance;
+        }
+    }
+}
+
+// On skin this bright the red has almost no room left: lit lips (pink, a little
+// darker in green and blue) look like a dot's red rim. A laser bright enough to
+// see there is white in the middle; they aren't.
+TEST(LaserDot, OnVeryBrightSkinLitLipsAreNotADot) {
+    Scene scene;
+    scene.faces[0].skin = cv::Scalar(190, 200, 232);
+    scene.marks = {{685, 345}};
+    scene.markReflectance = cv::Vec3f(0.9f, 0.85f, 1.3f);
+    EXPECT_FALSE(find(scene).found);
+}
+
 TEST(LaserDot, WorksOnDarkSkinAndForSmallOrLargeDots) {
     Scene scene;
     scene.faces[0].skin = cv::Scalar(55, 75, 105);
     scene.dots = {{685, 345}};
-    scene.dotColor = cv::Scalar(40, 40, 210);
     EXPECT_TRUE(find(scene).found) << "dark skin";
     scene = Scene{};
     scene.dots = {{685, 345}};
-    for (const int radius : {2, 4, 9}) {
-        scene.dotRadius = radius;
-        EXPECT_TRUE(find(scene).found) << "radius " << radius;
+    for (const float sigma : {0.7f, 1.3f, 2.4f}) {
+        scene.dotSigma = sigma;
+        EXPECT_TRUE(find(scene).found) << "sigma " << sigma;
     }
+}
+
+// A bright, close laser: its overexposed middle is far wider than its red rim,
+// and the whole of it belongs to the dot.
+TEST(LaserDot, ADotWithAWideWhiteMiddleIsFound) {
+    Scene scene;
+    scene.dots = {{685, 345}};
+    scene.dotStrength = 8;
+    scene.dotSigma = 2.4f;
+    const LaserDot dot = find(scene);
+    ASSERT_TRUE(dot.found);
+    EXPECT_NEAR(dot.center.x, 685, 1);
+    EXPECT_GT(dot.area, 150);
+}
+
+// Where the oval reaches outside the face's box (the beige wall beside it), a
+// dot doesn't count.
+TEST(LaserDot, ADotOutsideTheBoxNeverCounts) {
+    Scene scene;
+    scene.patches = {{cv::Rect2f(745, 250, 150, 170), kWall}};
+    scene.dots = {{790, 330}};
+    const cv::RotatedRect sliver({720, 330}, {300, 50}, 0);  // from landmarks gone astray
+    const cv::Mat frame = scene.render();
+    EXPECT_TRUE(findLaserDot(frame, sliver, {540, 200, 400, 260}).found) << "if the box were wider";
+    EXPECT_FALSE(findLaserDot(frame, sliver, kFaceBox).found);
+}
+
+TEST(LaserDot, LandmarksGoneAstrayFallBackToTheBox) {
+    Scene scene;
+    scene.patches = {{cv::Rect2f(745, 250, 150, 170), kWall}};
+    scene.dots = {{685, 345}};
+    EXPECT_TRUE(find(scene, kCoveredLandmarks).found) << "the cheek is in the box's oval";
+    scene.dots = {{790, 330}};
+    EXPECT_FALSE(find(scene, kCoveredLandmarks).found) << "the wall beside the face";
+}
+
+TEST(LaserDot, AFacePartlyOutsideTheFrame) {
+    const cv::Rect2f box(-60, 200, 200, 260);
+    Scene scene;
+    scene.faces = {{box}};
+    scene.dots = {{85, 345}};  // the cheek, still in the frame
+    const cv::Mat frame = scene.render();
+    const LaserDot dot = findLaserDot(frame, faceOval(box, landmarksAt(box)), box);
+    ASSERT_TRUE(dot.found);
+    EXPECT_NEAR(dot.center.x, 85, 1.5);
+    scene.dots = {{1, 330}};  // right at the edge
+    EXPECT_NO_THROW(findLaserDot(scene.render(), faceOval(box, landmarksAt(box)), box));
 }
 
 TEST_F(TargetingTest, ALaserOnAFaceMakesItTheTarget) {
@@ -196,7 +352,7 @@ TEST_F(TargetingTest, ALaserOnAFaceMakesItTheTarget) {
     run(selector, scene, tracks, 5);  // 0.17 s
     ASSERT_TRUE(selector.target().active()) << "TARGET within 0.2 s of the dot";
     EXPECT_EQ(selector.target().trackId, 1);
-    EXPECT_NEAR(selector.target().dot.x, 685, 1.5);
+    EXPECT_NEAR(selector.faces().at(1).dot.center.x, 685, 1.5);
     // The laser moves around on the face: still the target.
     scene.dots = {{620, 300}};
     EXPECT_EQ(run(selector, scene, tracks, 10), 10);
@@ -204,6 +360,17 @@ TEST_F(TargetingTest, ALaserOnAFaceMakesItTheTarget) {
     scene.dots.clear();
     run(selector, scene, tracks, 12);
     EXPECT_FALSE(selector.target().active());
+}
+
+TEST_F(TargetingTest, ALaserOnABrightlyLitFaceMakesItTheTarget) {
+    TargetSelector selector(classes);
+    const std::vector<Track> tracks = {makeTrack(1, classes.face(), kFaceBox, kLandmarks)};
+    Scene scene;
+    scene.faces[0].skin = kBrightSkin;
+    EXPECT_EQ(run(selector, scene, tracks, 30), 0);
+    scene.dots = {{685, 345}};
+    run(selector, scene, tracks, 5);
+    EXPECT_TRUE(selector.target().active());
 }
 
 TEST_F(TargetingTest, AFlashOfTheDotIsNotEnough) {
@@ -227,12 +394,55 @@ TEST_F(TargetingTest, ABriefMissDoesNotDropTheTarget) {
     EXPECT_EQ(run(selector, lit, tracks, 5), 5);
 }
 
+// While the face isn't detected (a hand passes in front of it), the target
+// stays; once the face is seen again without the dot, it is released after
+// releaseTime of looking, not right away.
+TEST_F(TargetingTest, TheTargetRidesOutAShortDetectionGap) {
+    TargetSelector selector(classes);
+    std::vector<Track> tracks = {makeTrack(1, classes.face(), kFaceBox, kLandmarks)};
+    Scene scene;
+    scene.dots = {{685, 345}};
+    run(selector, scene, tracks, 10);
+    ASSERT_TRUE(selector.target().active());
+    tracks[0].matched = false;  // predicted for a while, then hidden: 0.5 s in all
+    EXPECT_EQ(run(selector, scene, tracks, 6), 6);
+    tracks[0].visible = false;
+    EXPECT_EQ(run(selector, scene, tracks, 9), 9);
+    tracks[0].matched = tracks[0].visible = true;
+    scene.dots.clear();
+    EXPECT_EQ(run(selector, scene, tracks, 9), 9) << "0.3 s of looking without the dot";
+    run(selector, scene, tracks, 2);
+    EXPECT_FALSE(selector.target().active());
+}
+
+TEST_F(TargetingTest, TheTargetIsReleasedWhenItsFaceStaysUndetected) {
+    TargetSelector selector(classes);
+    std::vector<Track> tracks = {makeTrack(1, classes.face(), kFaceBox, kLandmarks)};
+    Scene scene;
+    scene.dots = {{685, 345}};
+    run(selector, scene, tracks, 10);
+    tracks[0].matched = false;
+    EXPECT_EQ(run(selector, scene, tracks, 30), 22) << "kept for 0.75 s";
+    EXPECT_FALSE(selector.target().active());
+}
+
 TEST_F(TargetingTest, AFlashlightIsNotALaser) {
     TargetSelector selector(classes);
     const std::vector<Track> tracks = {makeTrack(1, classes.face(), kFaceBox, kLandmarks)};
     Scene scene;
     run(selector, scene, tracks, 30);
     scene.faces[0].skin = cv::Scalar(225, 240, 255);
+    EXPECT_EQ(run(selector, scene, tracks, 60), 0);
+}
+
+TEST_F(TargetingTest, AStaticRedMarkNeverBecomesTheTarget) {
+    TargetSelector selector(classes);
+    const std::vector<Track> tracks = {makeTrack(1, classes.face(), kFaceBox, kLandmarks)};
+    Scene scene;
+    scene.marks = {{685, 345}};
+    EXPECT_EQ(run(selector, scene, tracks, 60), 0);
+    scene.markReflectance = kFluorescentMark;
+    scene.faces[0].skin = kBrightSkin;
     EXPECT_EQ(run(selector, scene, tracks, 60), 0);
 }
 
@@ -268,6 +478,35 @@ TEST_F(TargetingTest, TheTargetFollowsTheLaserToAnotherFace) {
     scene.dots = {{245, 345}};  // the same spot on the other face
     run(selector, scene, tracks, 10);
     EXPECT_EQ(selector.target().trackId, 2);
+}
+
+TEST_F(TargetingTest, WithADotOnTwoFacesTheTargetStays) {
+    TargetSelector selector(classes);
+    const cv::Rect2f otherBox(100, 200, 200, 260);
+    const std::vector<Track> tracks = {makeTrack(1, classes.face(), kFaceBox, kLandmarks),
+                                       makeTrack(2, classes.face(), otherBox, landmarksAt(otherBox))};
+    Scene scene;
+    scene.faces.push_back({otherBox});
+    scene.dots = {{685, 345}};
+    run(selector, scene, tracks, 10);
+    ASSERT_EQ(selector.target().trackId, 1);
+    scene.dots = {{685, 345}, {245, 345}};  // a second laser on the other face
+    for (int i = 0; i < 30; ++i) {
+        run(selector, scene, tracks, 1);
+        EXPECT_EQ(selector.target().trackId, 1) << "frame " << i;
+    }
+    EXPECT_TRUE(selector.faces().at(2).dot.found);
+}
+
+TEST_F(TargetingTest, AFacePartlyOutsideTheFrameCanBeTheTarget) {
+    TargetSelector selector(classes);
+    const cv::Rect2f box(-60, 200, 200, 260);
+    const std::vector<Track> tracks = {makeTrack(1, classes.face(), box, landmarksAt(box))};
+    Scene scene;
+    scene.faces = {{box}};
+    scene.dots = {{85, 345}};
+    run(selector, scene, tracks, 6);
+    EXPECT_TRUE(selector.target().active());
 }
 
 TEST_F(TargetingTest, AFaceWithoutAFreshDetectionIsNotLookedAt) {

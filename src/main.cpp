@@ -154,9 +154,9 @@ void dumpLaser(std::ofstream& out, long long frame, double tMs, const TargetSele
         if (!f.checked) continue;  // not looked at this frame
         const LaserDot& d = f.dot;
         char line[160];
-        std::snprintf(line, sizeof(line), "%lld,%.1f,%d,%d,%.1f,%.1f,%d,%.1f,%.2f,%d\n", frame, tMs,
-                      id, d.found ? 1 : 0, d.center.x, d.center.y, d.area, d.redness, d.skinAround,
-                      targeting.target().trackId == id ? 1 : 0);
+        std::snprintf(line, sizeof(line), "%lld,%.1f,%d,%d,%.1f,%.1f,%d,%.1f,%.0f,%.2f,%d\n", frame,
+                      tMs, id, d.found ? 1 : 0, d.center.x, d.center.y, d.area, d.redness, d.glow,
+                      d.skinAround, targeting.target().trackId == id ? 1 : 0);
         out << line;
     }
 }
@@ -285,7 +285,7 @@ int main(int argc, char** argv) try {
     if (!opt.dumpLaser.empty()) {
         laserDump.open(opt.dumpLaser);
         if (!laserDump) throw std::runtime_error("Failed to open " + opt.dumpLaser);
-        laserDump << "frame,t_ms,id,dot,x,y,area,redness,skin_around,target\n";
+        laserDump << "frame,t_ms,id,dot,x,y,area,redness,glow,skin_around,target\n";
     }
     std::ofstream labelDump;
     if (!opt.dumpLabels.empty() && recognizer) {
@@ -363,8 +363,8 @@ int main(int argc, char** argv) try {
         tracker.update(detections, tMs / 1000.0);
         latency.add("track", msSince(t1));
         const auto t2 = Clock::now();
-        // Recognition copies crops and targeting measures brightness: both happen
-        // before anything is drawn on the frame.
+        // Recognition copies crops and targeting looks for the laser's colors:
+        // both happen before anything is drawn on the frame.
         if (recognizer) recognizer->update(frame, tracker.tracks(), tMs / 1000.0);
         if (opt.targeting) targeting.update(frame, tracker.tracks(), tMs / 1000.0);
         if (laserDump.is_open()) dumpLaser(laserDump, frameIndex, tMs, targeting);

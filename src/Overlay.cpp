@@ -392,7 +392,7 @@ void drawHelp(cv::Mat& img, const Style& st) {
                          {"d", "Debug view on / off"},
                          {"h", "Show / hide this help"},
                          {"q", "Quit (Esc also quits)"}};
-    const char* target = "TARGET: a face a bright light shines on";
+    const char* target = "TARGET: a face a red laser dot is on";
     const char* predicted = "Corners only: predicted, not detected just now";
     const int title = st.font(18), body = st.font(15), heading = st.font(12);
     const int pad = st.px(22), cap = st.px(26), row = st.px(34), sample = st.px(34);

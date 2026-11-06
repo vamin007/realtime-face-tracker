@@ -92,6 +92,7 @@ TEST_F(OverlayTest, OnlyTheTargetIsRed) {
     const cv::Rect2f face(540, 200, 200, 260);
     TargetSelector targeting(classes);
     std::vector<Track> tracks = {makeTrack(2, 1, classes.face(), face)};
+    tracks[0].detected = face;
     tracks[0].keypoints = {{600, 290}, {680, 290}, {640, 330}, {610, 380}, {670, 380}};
     cv::Mat scene(720, 1280, CV_8UC3, cv::Scalar::all(150));
     cv::ellipse(scene, {640, 330}, {92, 135}, 0, 0, 360, cv::Scalar(120, 150, 200), cv::FILLED);
@@ -103,7 +104,8 @@ TEST_F(OverlayTest, OnlyTheTargetIsRed) {
         }
     };
     run(60);
-    cv::circle(scene, {685, 345}, 4, cv::Scalar(40, 40, 235), cv::FILLED);
+    // The laser's red light added to the skin: red saturates, green and blue rise a little.
+    cv::circle(scene, {685, 345}, 4, cv::Scalar(130, 160, 255), cv::FILLED);
     run(6);
     ASSERT_TRUE(targeting.target().active());
     options.targeting = &targeting;

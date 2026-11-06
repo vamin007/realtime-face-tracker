@@ -23,7 +23,7 @@ struct FrameInfo {
 
 struct DrawOptions {
     bool trails = false;                        // motion trail behind each track
-    bool debug = false;                         // confidence, brightness and recognition details
+    bool debug = false;                         // confidence, laser and recognition details
     bool help = false;                          // the list of keys
     const TargetSelector* targeting = nullptr;  // the TARGET; null when targeting is off
     const Recognizer* recognizer = nullptr;     // custom labels; null when there are none

@@ -66,7 +66,7 @@ void printUsage() {
            "  --no-window           don't show a window (video files only)\n"
            "  --no-mirror           don't flip the camera image horizontally\n"
            "  --show-trail          draw a motion trail behind each track\n"
-           "  --debug               show confidence, brightness, recognition details and timings\n"
+           "  --debug               show confidence, laser and recognition details and timings\n"
            "  --record PATH         save the raw camera feed as a video (e.g. clips/new.mov)\n"
            "  --no-log              don't write a CSV log\n"
            "\nDetection:\n"
@@ -77,7 +77,8 @@ void printUsage() {
            "  --backend B           coreml (GPU / Neural Engine, default) or cpu\n"
            "\nTARGET (a face a red laser dot is on):\n"
            "  --no-targeting        turn it off\n"
-           "  --laser-redness N     how much redder than the skin a dot must be, 0..255 (default 60)\n"
+           "  --laser-redness N     how much more a dot's red must rise above the skin's than its\n"
+           "                        green and blue, 0..255 (default 35)\n"
            "\nCustom labels (a specific person, recognized by their face, taught from photos):\n"
            "  Each label is a folder of photos, labels/NAME/; new and changed photos are\n"
            "  looked at when the tracker starts.\n"
@@ -134,8 +135,7 @@ bool parseArgs(const std::vector<std::string>& args, Options& opt) {
             else if (b == "cpu") opt.backend = Backend::Cpu;
             else throw std::runtime_error("--backend expects coreml or cpu, got '" + b + "'");
         } else if (arg == "--no-targeting") opt.targeting = false;
-        else if (arg == "--laser-redness")
-            opt.target.minRednessAbove = parseFloat(arg, next(), 0, 255);
+        else if (arg == "--laser-redness") opt.target.minRedGain = parseFloat(arg, next(), 0, 255);
         else if (arg == "--enroll") opt.enrollName = next();
         else if (arg == "--add-photos") {
             opt.enrollName = next();
