@@ -65,6 +65,25 @@ The user's call: "a neural network that actively reinforces recognition of a fac
   No measurable gain on these clips: the 3-photo label was already at the ceiling (the unlabeled rows are the 0.63 s spent collecting 3 votes), and both new photos (fingers over the face) never rank among the 3 closest for `flashlight.mov`'s views. The network stayed off ("needs other faces, 0 of 20 seen"): both clips show one person, so its on state is only unit-tested. Every auto-photo showed the right face. Speed, hand IDs (4/4) and TARGET (8/0) unchanged; unit tests 122 → 166.
 - **Known risks / next steps:** a look-alike that the photos call alex clearly and steadily gets photographed as alex (the gates trust a clear match; the network can't then separate them). Faces a hand box overlaps could be skipped (both `hands_face` auto-photos have fingers over the face). Not checked: the network on real other people (no clip has a second person), long runs at the 40-photo and 500-face caps, the live camera.
 
+### Face-hand-tracking (2026-11-06, branch `face-hand-tracking`): TARGET removed
+The user's call: "Strip the flashlight branch. Just have the face and hand tracking version." Branched from `flashlight-targeting-base` (0f7e32c); the laser version lives on `laser-target`. This branch tracks people, faces and hands, recognizes faces, and reinforces them; the TARGET is gone. Where this document describes the TARGET (M4, the UI polish round, the sections above), it describes the other branches and earlier versions.
+- **Removed:** `Targeting.{h,cpp}` and its tests; `--no-targeting`, `--target-ratio`, `--target-rise` and `--dump-light`; the red TARGET box, tag, "TARGET LOCKED" badge, help line and the debug view's light lines; the `target` and `light_ratio` log columns (the log is now `time_ms,frame,id,number,class,label,matched,x,y,w,h,conf,coasting`; `scripts/log_stats.py` reads columns by name and `tools/replay.cpp` writes its own CSV, so neither changed); the reserved label name `TARGET`; the run summary's "labels+target" stage is now "labels".
+- **The lit gate went too, not kept as an unused input.** Recognition's "not the TARGET, not lit, not within 2 s after a light" gate (`Recognizer::update`'s `lit` set, `litCooldown`, `CaptureInput::lit`, `CaptureGate::Lit`) was fed only by the TargetSelector. With nothing to feed it, it would be a never-set input that only synthetic tests exercise. Git history and the other branches keep it.
+- **Track colors unchanged:** the hue band that skips red is kept, so every ID keeps its color.
+- **Measured** (headless, label `me` from 3 face crops of `hands_face.mov`, as before):
+
+| | `hands_face.mov` | `flashlight.mov` |
+|---|---|---|
+| Classes in the log | person, face, hand | person, face, hand |
+| hand / face / person IDs | 4 / 1 / 2 | 4 / 1 / 2 |
+| TARGET in the log or on screen | none (no such column) | none |
+| Face rows labeled `me` | 2009 / 2026 (99.2%) | 1559 / 1576 (98.9%) |
+| Auto-photos taken | 2 | 2 |
+| Uncapped FPS (no labels / with `me` and the debug view) | 73.8 / 72.8 | 75.5 / 74.2 |
+
+  `--realtime` on `flashlight.mov`: 30.0 FPS, no skipped frames. The label rates and the IDs are exactly the ones measured before the removal. Unit tests: 166 → 153 (10 TargetingTest, the reserved-name test, the lit capture-gate test and the lit-face reinforcement test are gone; `OnlyTheTargetIsRed` became a test that each visible track's box has its own color; the reserved-name enroll/rename test now uses invalid names such as `alex smith`).
+- **Known consequence:** a face under a bright light can now be photographed for its label. On `flashlight.mov` the second auto-photo (36.8 s) was taken while the face was lit (face brightness about 1.2x the room's, by a separate offline estimate, against 0.77 for the first photo at 4.8 s); the old gate would very likely have refused it. The photo shows the right face and looks normal. Not checked: whether such photos ever hurt recognition over a long run.
+
 Still to do by the user, with the live camera (no clip covers these):
 - a live run: camera capture runs on a background thread now;
 - the UI polish overlay in a live window: the keys, pausing, the help panel, the pulsing TARGET corners;

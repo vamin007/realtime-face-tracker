@@ -195,9 +195,8 @@ protected:
     }
     // One frame, then waits for the crops it sent to be embedded (their
     // results are used in the next frame).
-    void step(double t, const cv::Mat& frame, const std::vector<Track>& tracks,
-              const std::set<int>& lit = {}) {
-        recognizer->update(frame, tracks, t, lit);
+    void step(double t, const cv::Mat& frame, const std::vector<Track>& tracks) {
+        recognizer->update(frame, tracks, t);
         recognizer->waitIdle();
     }
     // Alex in view from `from` to `to` s, one frame a second, a different view each time.
@@ -238,7 +237,6 @@ CaptureInput goodCapture() {
     in.detected = true;
     in.width = 160;
     in.sharpness = 1000;
-    in.lit = false;
     in.similarity = 0.7f;
     in.now = 100;
     in.lastPhoto = -1;
@@ -293,12 +291,6 @@ TEST(CapturePolicy, OnlyALargeSharpFace) {
     EXPECT_EQ(capturePolicy(in), CaptureGate::Take);
     in.sharpness = CaptureParams{}.minSharpness - 1;
     EXPECT_EQ(capturePolicy(in), CaptureGate::Blurry);
-}
-
-TEST(CapturePolicy, NotTheTargetOrALitFace) {
-    CaptureInput in = goodCapture();
-    in.lit = true;
-    EXPECT_EQ(capturePolicy(in), CaptureGate::Lit);
 }
 
 TEST(CapturePolicy, OnlyAViewTheLabelDoesntHaveYet) {
@@ -509,19 +501,6 @@ TEST_F(ReinforcementTest, NoPhotosOfAFaceItDoesntRecognize) {
     EXPECT_EQ(recognizer->labelOf(1), -1);
     stop();
     EXPECT_EQ(imagesUnder(dir), 3) << "only alex's own photos";
-}
-
-TEST_F(ReinforcementTest, NoPhotosOfTheTargetOrALitFace) {
-    makeLabel("alex", views(alex, 3, rng, 0.2f));
-    start();
-    for (int t = 0; t <= 20; ++t) step(t, frameWith(t % 20 + 1), {face(1, t)}, {1});
-    EXPECT_NE(recognizer->labelOf(1), -1) << "a lit face is still recognized";
-    EXPECT_TRUE(photoTimes().empty());
-    watchAlex(21, 30);
-    stop();
-    const std::vector<double> times = photoTimes();
-    ASSERT_EQ(times.size(), 1u);
-    EXPECT_GE(times[0], 22) << "not right after the light, while the camera adjusts";
 }
 
 TEST_F(ReinforcementTest, NoPhotosOfASmallOrBlurryFace) {

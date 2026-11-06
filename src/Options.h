@@ -2,8 +2,7 @@
 #include <string>
 #include <vector>
 
-#include "OrtModel.h"   // Backend
-#include "Targeting.h"  // TargetParams
+#include "OrtModel.h"  // Backend
 
 struct ModelPath {
     std::string path;
@@ -30,11 +29,9 @@ struct Options {
     bool labels = true;      // recognize custom labels
     bool autoPhotos = true;  // photograph recognized faces for their label (and keep other faces)
     bool showTrail = false;
-    bool debug = false;  // show brightness and recognition details on the boxes
+    bool debug = false;  // show recognition details on the boxes
     std::string record;  // save the raw camera feed to this video file
     bool window = true;
-    bool targeting = true;
-    TargetParams target;
 
     // One-off commands instead of tracking.
     bool listClasses = false;
@@ -49,7 +46,6 @@ struct Options {
     // Developer options
     long long maxFrames = 0;     // stop after this many frames; 0 = no limit
     std::string dumpDetections;  // CSV of every raw detection per frame
-    std::string dumpLight;       // CSV of each face's brightness per frame
     std::string dumpLabels;      // CSV of each recognition result
     std::string saveFrames;      // directory for annotated snapshots
     int saveEvery = 30;

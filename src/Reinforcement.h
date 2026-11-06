@@ -46,7 +46,6 @@ struct CaptureInput {
     bool detected = false;  // confidently detected in the frame the crop is from (not coasting)
     float width = 0;        // px
     float sharpness = 0;
-    bool lit = false;       // the TARGET or lit by a bright light, now or a moment ago
     float similarity = 0;   // the highest similarity to the label's samples
     double now = 0;         // s, when the crop was taken
     double lastPhoto = -1;  // s, when the label's last photo was; -1: none yet
@@ -59,7 +58,6 @@ enum class CaptureGate {
     Unstable,
     NotDetected,
     TooSmall,
-    Lit,
     TooSoon,
     LowScore,
     CloseRunnerUp,

@@ -589,35 +589,35 @@ TEST_F(LabelSync, WholePhotoFaceLabelsOfAnEarlierVersionAreLookedAtAgain) {
     EXPECT_FALSE(library.needsSync()) << "label.yml's whole_photo isn't used";
 }
 
-TEST_F(LabelSync, TargetIsReservedForTheRedTargetBox) {
+TEST_F(LabelSync, EnrollAndRenameRefuseABadName) {
     const fs::path source = root / "photos";
     photo(source / "a.png", 10);
     const std::vector<std::string> photos = {(source / "a.png").string()};
     LabelLibrary library(dir);
     library.load();
-    for (const char* name : {"TARGET", "target", "Target"}) {
+    for (const char* name : {"alex smith", "a,b", "../etc"}) {
         const std::string error =
             errorOf([&] { enroll(name, photos, detector, classes, embedder, library); });
-        EXPECT_TRUE(contains(error, "TARGET is reserved")) << name << ": " << error;
+        EXPECT_TRUE(contains(error, "letters, digits")) << name << ": " << error;
     }
     EXPECT_TRUE(fs::is_empty(dir)) << "no folder made";
 
     enroll("alex", photos, detector, classes, embedder, library);
-    const std::string error = errorOf([&] { renameLabel("alex", "Target", library, classes); });
-    EXPECT_TRUE(contains(error, "TARGET is reserved")) << error;
+    const std::string error = errorOf([&] { renameLabel("alex", "sam smith", library, classes); });
+    EXPECT_TRUE(contains(error, "letters, digits")) << error;
     EXPECT_TRUE(fs::exists(fs::path(dir) / "alex"));
 
     // A folder made by hand is reported, not loaded, and can be renamed.
-    photo(fs::path(dir) / "TARGET" / "a.png", 60);
+    photo(fs::path(dir) / "sam smith" / "a.png", 60);
     library.load();
-    const int f = library.findFolder("TARGET");
+    const int f = library.findFolder("sam smith");
     ASSERT_GE(f, 0);
-    EXPECT_TRUE(contains(library.folders()[f].problem, "TARGET is reserved"));
+    EXPECT_TRUE(contains(library.folders()[f].problem, "letters, digits"));
     EXPECT_TRUE(contains(library.folders()[f].problem, "rename the folder"));
     sync(library);
     ASSERT_EQ(library.labels().size(), 1u);
     EXPECT_EQ(library.labels()[0].name, "alex");
-    renameLabel("TARGET", "sam", library, classes);
+    renameLabel("sam smith", "sam", library, classes);
     library.load();
     sync(library);
     EXPECT_GE(library.find("sam"), 0);

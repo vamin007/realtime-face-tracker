@@ -8,7 +8,6 @@
 #include "Detector.h"
 #include "Recognizer.h"
 #include "TagLayout.h"
-#include "Targeting.h"
 #include "Tracker.h"
 
 // What the overlay shows about the current frame besides the tracks.
@@ -22,17 +21,16 @@ struct FrameInfo {
 };
 
 struct DrawOptions {
-    bool trails = false;                        // motion trail behind each track
-    bool debug = false;                         // confidence, brightness and recognition details
-    bool help = false;                          // the list of keys
-    const TargetSelector* targeting = nullptr;  // the TARGET; null when targeting is off
-    const Recognizer* recognizer = nullptr;     // custom labels; null when there are none
+    bool trails = false;                     // motion trail behind each track
+    bool debug = false;                      // confidence and recognition details
+    bool help = false;                       // the list of keys
+    const Recognizer* recognizer = nullptr;  // custom labels; null when there are none
 };
 
 // Draws the tracks and the HUD on the frame. Each track gets a box and a tag
-// with "class #n", or its custom label when the recognizer gave it one; the
-// target gets a thick red box tagged "TARGET". Tags stay inside the frame and
-// off each other, and keep their places from frame to frame.
+// with "class #n", or its custom label when the recognizer gave it one. Tags
+// stay inside the frame and off each other, and keep their places from frame
+// to frame.
 class Overlay {
 public:
     void draw(cv::Mat& frame, const std::vector<Track>& tracks, const ClassRegistry& classes,
@@ -50,7 +48,7 @@ bool applyViewKey(int key, DrawOptions& options);
 std::vector<std::pair<std::string, int>> countByClass(const std::vector<Track>& tracks,
                                                       const ClassRegistry& classes);
 
-// A track's color: stable per id and never red (red is reserved for the TARGET).
+// A track's color: stable per id, from a band of hues that leaves out red, orange and pink.
 cv::Scalar trackColor(int id);
 
 // A track is drawn and logged once confirmed, while seen recently (see TrackerParams::coastTime).

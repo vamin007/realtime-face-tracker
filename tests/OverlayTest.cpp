@@ -19,13 +19,6 @@ Track makeTrack(int id, int number, ClassId cls, const cv::Rect2f& box, bool vis
     return t;
 }
 
-// Pixels that are clearly red, the TARGET's color.
-int redPixels(const cv::Mat& frame) {
-    cv::Mat red;
-    cv::inRange(frame, cv::Scalar(0, 0, 200), cv::Scalar(60, 60, 255), red);
-    return cv::countNonZero(red);
-}
-
 class OverlayTest : public ::testing::Test {
 protected:
     ClassRegistry classes;  // person, hand, face
@@ -72,49 +65,28 @@ TEST_F(OverlayTest, CountsVisibleTracksPerClass) {
     EXPECT_EQ(counts, expected);
 }
 
-TEST_F(OverlayTest, OnlyTheTargetIsRed) {
+TEST_F(OverlayTest, DrawsEachVisibleTrackInItsOwnColor) {
     const cv::Mat empty(720, 1280, CV_8UC3, cv::Scalar(90, 90, 90));
+    cv::Mat frame = empty.clone();
     DrawOptions options;
     options.trails = options.debug = true;
     FrameInfo info;
     info.fps = 30;
     info.uptime = 10;
     info.recording = info.paused = true;
-
-    // No target: there is something on screen, but nothing red.
-    cv::Mat frame = empty.clone();
     Overlay overlay;
     overlay.draw(frame, crowd(), classes, options, info);
     EXPECT_GT(cv::norm(frame, empty, cv::NORM_L1), 0);
-    EXPECT_EQ(redPixels(frame), 0);
 
-    // A light comes on the face: it becomes the target and is drawn red.
-    const cv::Rect2f face(540, 200, 200, 260);
-    TargetSelector targeting(classes);
-    std::vector<Track> tracks = {makeTrack(2, 1, classes.face(), face)};
-    cv::Mat scene(720, 1280, CV_8UC3, cv::Scalar::all(150));
-    scene(cv::Rect(face)).setTo(cv::Scalar::all(110));
-    double now = 0;
-    auto run = [&](int frames) {
-        for (int i = 0; i < frames; ++i, now += 1.0 / 30) {
-            tracks[0].lastSeen = tracks[0].lastStrong = now;
-            targeting.update(scene, tracks, now);
-        }
-    };
-    run(60);
-    scene.setTo(cv::Scalar::all(110));
-    scene(cv::Rect(face)).setTo(cv::Scalar::all(190));
-    run(6);
-    ASSERT_TRUE(targeting.target().active());
-    options.targeting = &targeting;
-    frame = empty.clone();
-    overlay.draw(frame, crowd(), classes, options, info);
-    const cv::Rect around(460, 100, 360, 440);  // the face's box, its marks and its tag
-    EXPECT_GT(redPixels(frame(around)), 1000);
-    cv::Mat outside = frame.clone();
-    outside(around).setTo(cv::Scalar(90, 90, 90));
-    outside(cv::Rect(440, 0, 400, 60)).setTo(cv::Scalar(90, 90, 90));  // "TARGET LOCKED"
-    EXPECT_EQ(redPixels(outside), 0);
+    // The middle of each visible box's left edge has the track's color. The
+    // hidden hand's box would have its edge at the frame's left side.
+    for (const Track& t : crowd()) {
+        const cv::Point edge(static_cast<int>(t.box.x),
+                             static_cast<int>(t.box.y + t.box.height / 2));
+        const cv::Vec3b px = frame.at<cv::Vec3b>(edge);
+        const cv::Scalar color = t.visible ? trackColor(t.id) : cv::Scalar(90, 90, 90);
+        EXPECT_EQ(cv::Scalar(px[0], px[1], px[2]), color) << "track " << t.id;
+    }
 }
 
 TEST_F(OverlayTest, DrawsOnAnyFrameSize) {

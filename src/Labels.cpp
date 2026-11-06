@@ -98,8 +98,6 @@ std::string labelNameProblem(const std::string& name) {
     };
     if (name.empty() || name.size() > 40 || !std::all_of(name.begin(), name.end(), allowed))
         return "label names may only use letters, digits, _ and -";
-    // Labeled tracks show the label's name, and a TARGET tag would pass for the target.
-    if (lower(name) == "target") return "TARGET is reserved for the red TARGET box";
     return "";
 }
 

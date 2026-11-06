@@ -5,7 +5,6 @@
 #include <memory>
 #include <mutex>
 #include <opencv2/core.hpp>
-#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -35,7 +34,6 @@ struct RecognizerParams {
     // Reinforcement (with a Reinforcer): photos of recognized faces for their
     // label, and the embeddings of faces that match no label.
     bool autoPhotos = true;
-    double litCooldown = 2.0;  // s after a face was lit (or the TARGET) before it's photographed
     CaptureParams capture;
     OtherFaceParams others;
 };
@@ -58,7 +56,6 @@ struct TrackIdentity {
     std::string netLabel;      // the network's likeliest answer in the latest check ("other": none)
     float netProb = -1;        // ... and its probability; -1: the network was off
     std::string photo;         // labeled tracks: whether the latest check took a photo, or why not
-    double litAt = -1;         // last time it was lit or the TARGET
     std::vector<Embedding> others;  // kept while it matched no label (other people's faces)
     double otherAt = -1;            // when the last of them was kept
 };
@@ -94,11 +91,8 @@ public:
     Recognizer(const Recognizer&) = delete;
     Recognizer& operator=(const Recognizer&) = delete;
 
-    // Call after the tracker each frame, before drawing on the frame. `lit`:
-    // face tracks that are the TARGET or lit by a bright light now (they look
-    // unlike themselves, so they aren't photographed).
-    void update(const cv::Mat& frame, const std::vector<Track>& tracks, double now,
-                const std::set<int>& lit = {});
+    // Call after the tracker each frame, before drawing on the frame.
+    void update(const cv::Mat& frame, const std::vector<Track>& tracks, double now);
 
     int labelOf(int trackId) const;                    // -1 if none
     const std::string* labelName(int trackId) const;   // null if none
@@ -121,7 +115,6 @@ private:
         std::vector<cv::Point2f> keypoints;
         float conf = 0;
         bool detected = false;  // confidently detected in that frame
-        bool lit = false;       // lit, or only just
         bool photo = false;     // it may be photographed: embed it mirrored too, keep the crop
     };
     struct Result {

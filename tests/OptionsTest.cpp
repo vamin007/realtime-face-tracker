@@ -19,7 +19,6 @@ TEST(Options, Defaults) {
     EXPECT_EQ(opt.yoloModel.path, "/project/models/yolov8n_384x640.onnx");
     EXPECT_FALSE(opt.yoloModel.explicitlySet);
     EXPECT_EQ(opt.labelsDir, "/project/labels");
-    EXPECT_TRUE(opt.targeting);
     EXPECT_TRUE(opt.labels);
     EXPECT_FLOAT_EQ(opt.confFace, 0.6f);
 }

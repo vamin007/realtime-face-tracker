@@ -49,7 +49,6 @@ CaptureGate capturePolicy(const CaptureInput& in, const CaptureParams& p) {
     if (in.streak < p.minStreak) return CaptureGate::Unstable;
     if (!in.detected) return CaptureGate::NotDetected;
     if (in.width < p.minWidth) return CaptureGate::TooSmall;
-    if (in.lit) return CaptureGate::Lit;
     if (in.lastPhoto >= 0 && in.now - in.lastPhoto < p.interval) return CaptureGate::TooSoon;
     if (in.score < in.threshold + p.scoreLead) return CaptureGate::LowScore;
     if (in.score - in.runnerUp < p.minMargin) return CaptureGate::CloseRunnerUp;
@@ -70,8 +69,6 @@ const char* describe(CaptureGate gate) {
             return "not detected";
         case CaptureGate::TooSmall:
             return "too small";
-        case CaptureGate::Lit:
-            return "lit";
         case CaptureGate::TooSoon:
             return "too soon";
         case CaptureGate::LowScore:

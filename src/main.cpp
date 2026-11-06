@@ -29,7 +29,6 @@
 #include "Overlay.h"
 #include "Recognizer.h"
 #include "Reinforcement.h"
-#include "Targeting.h"
 #include "Tracker.h"
 #include "YoloDetector.h"
 
@@ -157,32 +156,11 @@ void dumpDetections(std::ofstream& out, long long frame, double tMs,
     }
 }
 
-// Faces that are the TARGET or lit by a bright light now: they look unlike
-// themselves, so recognition doesn't photograph them for their label.
-std::set<int> litFaces(const TargetSelector& targeting) {
-    std::set<int> lit;
-    for (const auto& [id, f] : targeting.faces())
-        if (f.litSince >= 0) lit.insert(id);
-    if (targeting.target().active()) lit.insert(targeting.target().trackId);
-    return lit;
-}
-
 // "Face network: off: needs other faces (0 of 20 seen); ...".
 void printFaceNet(const std::string& status) {
     std::cout << "Face network: " << status;
     if (status.rfind("on", 0) != 0) std::cout << "; recognition uses the photos alone";
     std::cout << '\n';
-}
-
-void dumpLight(std::ofstream& out, long long frame, double tMs, const TargetSelector& targeting) {
-    for (const auto& [id, f] : targeting.faces()) {
-        if (f.lastUpdate * 1000.0 < tMs - 1) continue;  // not measured this frame
-        char line[160];
-        std::snprintf(line, sizeof(line), "%lld,%.1f,%d,%.1f,%.1f,%.3f,%.3f,%.3f,%d,%d\n", frame,
-                      tMs, id, f.faceLuma, targeting.background(), f.ratio, f.normalRatio, f.rise(),
-                      f.litSince >= 0 ? 1 : 0, targeting.target().trackId == id ? 1 : 0);
-        out << line;
-    }
 }
 
 }  // namespace
@@ -314,16 +292,11 @@ int main(int argc, char** argv) try {
         logger = std::make_unique<Logger>(opt.logDir);
         std::cout << "Logging to " << logger->path() << '\n';
     }
-    std::ofstream dump, lightDump;
+    std::ofstream dump;
     if (!opt.dumpDetections.empty()) {
         dump.open(opt.dumpDetections);
         if (!dump) throw std::runtime_error("Failed to open " + opt.dumpDetections);
         dump << "frame,t_ms,class,conf,weak,x,y,w,h,keypoints\n";
-    }
-    if (!opt.dumpLight.empty()) {
-        lightDump.open(opt.dumpLight);
-        if (!lightDump) throw std::runtime_error("Failed to open " + opt.dumpLight);
-        lightDump << "frame,t_ms,id,face_luma,background,ratio,normal,rise,lit,target\n";
     }
     std::ofstream labelDump;
     if (!opt.dumpLabels.empty() && recognizer) {
@@ -337,7 +310,6 @@ int main(int argc, char** argv) try {
 
     Tracker tracker(classes);
     tracker.setFrameSize(camera.frameSize());
-    TargetSelector targeting(classes, opt.target);
     const std::string window = "Object Tracker";
     if (opt.window) cv::namedWindow(window, cv::WINDOW_NORMAL);
     std::signal(SIGINT, onInterrupt);
@@ -352,7 +324,6 @@ int main(int argc, char** argv) try {
     DrawOptions draw;
     draw.trails = opt.showTrail;
     draw.debug = opt.debug;
-    draw.targeting = opt.targeting ? &targeting : nullptr;
     draw.recognizer = recognizer.get();
     Overlay overlay;
     cv::Mat raw;  // the frame before drawing, to redraw it while paused
@@ -402,15 +373,9 @@ int main(int argc, char** argv) try {
         tracker.update(detections, tMs / 1000.0);
         latency.add("track", msSince(t1));
         const auto t2 = Clock::now();
-        // Targeting measures brightness and recognition copies crops: both happen
-        // before anything is drawn on the frame. Targeting goes first, so
-        // recognition knows which faces are lit.
-        if (opt.targeting) targeting.update(frame, tracker.tracks(), tMs / 1000.0);
-        if (recognizer)
-            recognizer->update(frame, tracker.tracks(), tMs / 1000.0,
-                               opt.targeting ? litFaces(targeting) : std::set<int>{});
-        if (lightDump.is_open()) dumpLight(lightDump, frameIndex, tMs, targeting);
-        latency.add("labels+target", msSince(t2));
+        // Recognition copies crops, so it happens before anything is drawn on the frame.
+        if (recognizer) recognizer->update(frame, tracker.tracks(), tMs / 1000.0);
+        latency.add("labels", msSince(t2));
 
         const std::vector<Track>* shown = &tracker.tracks();
         if (!filter.labelOnly.empty()) {
@@ -419,9 +384,7 @@ int main(int argc, char** argv) try {
                 if (filter.shows(t, classes, recognizer.get())) filtered.push_back(t);
             shown = &filtered;
         }
-        if (logger)
-            logger->log(frameIndex, tMs, *shown, classes, opt.targeting ? &targeting : nullptr,
-                        recognizer.get());
+        if (logger) logger->log(frameIndex, tMs, *shown, classes, recognizer.get());
 
         // Smoothed FPS so the number doesn't flicker.
         const auto now = Clock::now();

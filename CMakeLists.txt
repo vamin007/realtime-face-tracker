@@ -25,7 +25,6 @@ add_library(tracker_core STATIC
     src/Assignment.cpp
     src/KalmanBox.cpp
     src/Tracker.cpp
-    src/Targeting.cpp
     src/Embedder.cpp
     src/FaceNet.cpp
     src/Labels.cpp
@@ -74,7 +73,6 @@ if(GTest_FOUND)
         tests/OverlayTest.cpp
         tests/ReinforcementTest.cpp
         tests/TagLayoutTest.cpp
-        tests/TargetingTest.cpp
         tests/TrackerTest.cpp
     )
     target_link_libraries(tracker_tests PRIVATE tracker_core GTest::gtest_main)

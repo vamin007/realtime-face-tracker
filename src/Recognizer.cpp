@@ -159,7 +159,7 @@ void Recognizer::apply(Result& result) {
     if (id.label >= 0) {
         considerPhoto(id, result, m);
     } else if (reinforcer_ && params_.autoPhotos && !id.everMatched &&
-               nearest < -params_.others.below && result.job.detected && !result.job.lit &&
+               nearest < -params_.others.below && result.job.detected &&
                result.job.box.width >= params_.capture.minWidth &&
                result.sharpness >= params_.capture.minSharpness &&
                static_cast<int>(id.others.size()) < params_.others.perTrack &&
@@ -221,7 +221,6 @@ bool Recognizer::mayPhotograph(const TrackIdentity& id, const Job& job) const {
     in.detected = job.detected;
     in.width = job.box.width;
     in.sharpness = FLT_MAX;
-    in.lit = job.lit;
     in.similarity = -1;
     in.now = job.time;
     in.lastPhoto = lastPhoto(id.label);
@@ -240,7 +239,6 @@ void Recognizer::considerPhoto(TrackIdentity& id, const Result& r, const LabelMa
     in.detected = r.job.detected;
     in.width = r.job.box.width;
     in.sharpness = r.sharpness;
-    in.lit = r.job.lit;
     in.similarity = maxSimilarity(label, r.embedding);
     in.now = r.job.time;
     in.lastPhoto = lastPhoto(id.label);
@@ -300,8 +298,7 @@ void Recognizer::handOver(TrackIdentity& id) {
     id.others.clear();
 }
 
-void Recognizer::update(const cv::Mat& frame, const std::vector<Track>& tracks, double now,
-                        const std::set<int>& lit) {
+void Recognizer::update(const cv::Mat& frame, const std::vector<Track>& tracks, double now) {
     now_ = now;
     useLatestNet();  // a network the reinforcer has just trained
     // 1. Use finished embeddings.
@@ -326,7 +323,6 @@ void Recognizer::update(const cv::Mat& frame, const std::vector<Track>& tracks, 
     std::vector<const Track*> due;
     for (const Track& t : tracks) {
         if (library_.labels().empty() || classes_.base(t.classId) != classes_.face()) continue;
-        if (lit.count(t.id)) identities_[t.id].litAt = now;
         if (!t.visible || !t.matched) continue;
         const TrackIdentity& id = identities_[t.id];
         if (id.pending) continue;
@@ -360,7 +356,6 @@ void Recognizer::update(const cv::Mat& frame, const std::vector<Track>& tracks, 
         for (const cv::Point2f& p : t->keypoints) job.keypoints.push_back(p - origin);
         job.conf = t->conf;
         job.detected = t->matched && !t->coasting && t->lastStrong >= t->lastSeen;
-        job.lit = id.litAt >= 0 && now - id.litAt < params_.litCooldown;
         job.photo = mayPhotograph(id, job);
         jobs_.push_back(std::move(job));
         ++inFlight_;

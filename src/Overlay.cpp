@@ -9,14 +9,12 @@
 
 namespace {
 
-const cv::Scalar kTargetRed(0, 0, 255);
 const cv::Scalar kWhite(255, 255, 255);
 const cv::Scalar kInk(30, 30, 30);      // dark text on light chips and key caps
 const cv::Scalar kPanel(28, 26, 24);    // background of tags and panels
 const cv::Scalar kSoft(225, 225, 225);  // body text on panels
 const cv::Scalar kDim(175, 175, 175);   // secondary text
 const cv::Scalar kAmber(0, 190, 255);   // PAUSED
-const double kPi = 3.14159265358979;
 
 // Sizes for a frame. Everything scales with the frame's height (1 at 720p), so
 // the overlay reads the same at any resolution.
@@ -128,19 +126,6 @@ void drawBox(cv::Mat& img, const cv::Rect& box, const cv::Scalar& color, bool pr
     drawCorners(img, box, color, length, st.px(3));
 }
 
-// The TARGET: a thick red box, with corner marks around it that pulse gently.
-// Its tag goes above the marks (targetFrame), not on them.
-int targetMargin(const Style& st) { return st.px(14); }
-
-void drawTargetBox(cv::Mat& img, const cv::Rect& box, double uptime, const Style& st) {
-    cv::rectangle(img, box, kTargetRed, st.px(3));
-    const double pulse = 0.5 + 0.5 * std::sin(2 * kPi * 1.2 * uptime);
-    const int gap = targetMargin(st) - static_cast<int>(std::lround(st.px(5) * pulse));
-    const int length =
-        std::clamp(static_cast<int>(0.25 * std::min(box.width, box.height)), st.px(12), st.px(34));
-    drawCorners(img, grown(box, gap), kTargetRed, length, st.px(3));
-}
-
 // A fading trail through the track's recent centers: older parts are fainter
 // and thinner. It's drawn into a mask, then blended in one pass over its area.
 void drawTrail(cv::Mat& img, const Track& t, const cv::Scalar& color, const Style& st) {
@@ -182,13 +167,12 @@ struct Span {
     cv::Scalar color;
 };
 
-// A tag: its name on a dark plate with a stripe of the track's color (the
-// TARGET's on solid red), and in the debug view smaller detail lines below.
+// A tag: its name on a dark plate with a stripe of the track's color, and in
+// the debug view smaller detail lines below.
 struct Tag {
     Span name;
     std::vector<Span> details;
     cv::Scalar color;
-    bool target = false;
 };
 
 struct TagMetrics {
@@ -206,24 +190,15 @@ cv::Size measure(const Tag& tag, const TagMetrics& m) {
         h += d.size + m.gap;
     }
     if (!tag.details.empty()) h += m.padY;
-    return {w + 2 * m.padX + (tag.target ? 0 : m.stripe), h};
+    return {w + 2 * m.padX + m.stripe, h};
 }
 
 void drawTag(cv::Mat& img, const Tag& tag, const cv::Rect& r, const TagMetrics& m,
              const Style& st) {
     const int radius = st.px(4), head = nameHeight(tag, m);
-    const bool details = !tag.details.empty();
-    int x = r.x + m.padX;
-    if (tag.target) {
-        fillRounded(img, {r.x, r.y, r.width, head}, kTargetRed, 1.0, radius, true, !details);
-        if (details)
-            fillRounded(img, {r.x, r.y + head, r.width, r.height - head}, kPanel, 0.8, radius,
-                        false, true);
-    } else {
-        fillRounded(img, r, kPanel, 0.8, radius);
-        cv::rectangle(img, cv::Rect(r.x, r.y, m.stripe, r.height), tag.color, cv::FILLED);
-        x += m.stripe;
-    }
+    fillRounded(img, r, kPanel, 0.8, radius);
+    cv::rectangle(img, cv::Rect(r.x, r.y, m.stripe, r.height), tag.color, cv::FILLED);
+    const int x = r.x + m.padX + m.stripe;
     drawText(img, tag.name.text, {x, r.y + m.padY}, tag.name.color, tag.name.size, tag.name.weight);
     int y = r.y + head;
     for (const Span& d : tag.details) {
@@ -232,26 +207,13 @@ void drawTag(cv::Mat& img, const Tag& tag, const cv::Rect& r, const TagMetrics& 
     }
 }
 
-// Debug view: the detection confidence, why a face is or isn't the TARGET, how
-// close the track is to a label, what the face network says, and whether the
-// latest check took a photo for the label.
+// Debug view: the detection confidence, how close the track is to a label, what
+// the face network says, and whether the latest check took a photo for the label.
 std::vector<std::string> debugLines(const Track& t, bool predicted, const DrawOptions& options) {
     std::vector<std::string> lines;
     char buf[96];
     std::snprintf(buf, sizeof(buf), "conf %.2f%s", t.conf, predicted ? ", predicted" : "");
     lines.push_back(buf);
-    if (options.targeting) {
-        const auto it = options.targeting->faces().find(t.id);
-        if (it != options.targeting->faces().end()) {
-            const FaceLight& f = it->second;
-            if (f.blocked) lines.push_back("light: not measured");
-            else {
-                std::snprintf(buf, sizeof(buf), "light %.2fx room, %.2fx normal", f.ratio,
-                              f.rise());
-                lines.push_back(buf);
-            }
-        }
-    }
     if (options.recognizer) {
         if (const TrackIdentity* id = options.recognizer->identity(t.id);
             id && !id->closest.empty()) {
@@ -363,23 +325,6 @@ cv::Rect hud(cv::Mat& img, const FrameInfo& info,
     return panel;
 }
 
-// "TARGET LOCKED" at the top center while there is a target.
-cv::Rect lockBadge(cv::Mat& img, const Style& st, bool paint) {
-    const std::string text = "TARGET LOCKED";
-    const int size = st.font(15), padX = st.px(12), h = size + st.px(14), icon = size;
-    const int w = 2 * padX + icon + st.px(8) + textWidth(text, size, 700);
-    const cv::Rect r((img.cols - w) / 2, st.px(12), w, h);
-    if (!paint) return r;
-    fillRounded(img, r, kTargetRed, 1.0, h / 2);
-    // A small bull's-eye: a ring and a dot.
-    const cv::Point c(r.x + padX + icon / 2, r.y + h / 2);
-    cv::circle(img, c, icon / 2 - st.px(1), kWhite, st.px(2), cv::LINE_AA);
-    cv::circle(img, c, st.px(2), kWhite, cv::FILLED, cv::LINE_AA);
-    drawText(img, text, {r.x + padX + icon + st.px(8), r.y + (h - size) / 2 + st.px(1)}, kWhite,
-             size, 700);
-    return r;
-}
-
 // A key cap with a letter on it, size x size.
 void drawKey(cv::Mat& img, const std::string& key, cv::Point topLeft, int size, const Style& st) {
     fillRounded(img, {topLeft.x, topLeft.y, size, size}, cv::Scalar(235, 235, 235), 1.0, st.px(5));
@@ -390,7 +335,7 @@ void drawKey(cv::Mat& img, const std::string& key, cv::Point topLeft, int size, 
              kInk, text, 700);
 }
 
-// The help: the keys, and what the TARGET and prediction boxes mean.
+// The help: the keys, and what the prediction boxes mean.
 void drawHelp(cv::Mat& img, const Style& st) {
     struct Line {
         const char* key;
@@ -401,16 +346,14 @@ void drawHelp(cv::Mat& img, const Style& st) {
                          {"d", "Debug view on / off"},
                          {"h", "Show / hide this help"},
                          {"q", "Quit (Esc also quits)"}};
-    const char* target = "TARGET: a face a bright light shines on";
     const char* predicted = "Corners only: predicted, not detected just now";
     const int title = st.font(18), body = st.font(15), heading = st.font(12);
     const int pad = st.px(22), cap = st.px(26), row = st.px(34), sample = st.px(34);
     const int textX = cap + st.px(14);
-    int w =
-        std::max({textWidth("Keys", title, 700), sample + st.px(14) + textWidth(target, body, 400),
-                  sample + st.px(14) + textWidth(predicted, body, 400)});
+    int w = std::max(textWidth("Keys", title, 700),
+                     sample + st.px(14) + textWidth(predicted, body, 400));
     for (const Line& k : keys) w = std::max(w, textX + textWidth(k.what, body, 400));
-    const int h = title + st.px(14) + 5 * row + st.px(14) + heading + st.px(10) + 2 * row;
+    const int h = title + st.px(14) + 5 * row + st.px(14) + heading + st.px(10) + row;
     const cv::Rect panel((img.cols - w) / 2 - pad, (img.rows - h) / 2 - pad, w + 2 * pad,
                          h + 2 * pad);
     fillRounded(img, panel, kPanel, 0.86, st.px(12));
@@ -427,13 +370,8 @@ void drawHelp(cv::Mat& img, const Style& st) {
     drawText(img, "ON SCREEN", {x, y}, kDim, heading, 700);
     y += heading + st.px(10);
     const int sh = st.px(22);
-    const cv::Rect redBox(x + st.px(4), y + (row - sh) / 2 - st.px(4), sample - st.px(8), sh);
-    cv::rectangle(img, redBox, kTargetRed, st.px(3));
-    drawText(img, target, {x + sample + st.px(14), y + (row - body) / 2 - st.px(4)}, kSoft, body,
-             400);
-    y += row;
-    drawCorners(img, {redBox.x, redBox.y + row, redBox.width, redBox.height}, kSoft, st.px(7),
-                st.px(3));
+    drawCorners(img, {x + st.px(4), y + (row - sh) / 2 - st.px(4), sample - st.px(8), sh}, kSoft,
+                st.px(7), st.px(3));
     drawText(img, predicted, {x + sample + st.px(14), y + (row - body) / 2 - st.px(4)}, kSoft, body,
              400);
 }
@@ -503,60 +441,38 @@ void Overlay::draw(cv::Mat& frame, const std::vector<Track>& tracks, const Class
                    const DrawOptions& options, const FrameInfo& info) {
     const Style st(frame.size());
     const cv::Rect inFrame(0, 0, frame.cols, frame.rows);
-    const Target* target = options.targeting && options.targeting->target().active()
-                               ? &options.targeting->target()
-                               : nullptr;
 
     struct Shown {
         int id;
         cv::Rect box;
         cv::Scalar color;
-        bool target, predicted, labeled;
-        const Track* track;  // null for the target's last box
+        bool predicted, labeled;
+        const Track* track;
         std::string name;
     };
     std::vector<Shown> shown;
-    bool targetShown = false;
     for (const Track& t : tracks) {
         if (!isVisible(t)) continue;
-        Shown s{t.id, toRect(t.box) & inFrame, trackColor(t.id), false, false, false, &t, ""};
+        Shown s{t.id, toRect(t.box) & inFrame, trackColor(t.id), false, false, &t, ""};
         if (s.box.empty()) continue;
-        s.target = target && t.id == target->trackId;
         s.predicted = t.coasting;
         // A custom label is one specific item, so it needs no number.
         const std::string* custom =
             options.recognizer ? options.recognizer->labelName(t.id) : nullptr;
         s.labeled = custom != nullptr;
-        s.name = s.target ? "TARGET"
-                 : custom ? *custom
-                          : classes.name(t.classId) + " #" + std::to_string(t.number);
-        if (s.target) s.color = kTargetRed;
-        targetShown |= s.target;
+        s.name = custom ? *custom : classes.name(t.classId) + " #" + std::to_string(t.number);
         shown.push_back(std::move(s));
-    }
-    // The target can be briefly undetected (its track then isn't visible): keep
-    // showing it on its last box.
-    if (target && !targetShown) {
-        const cv::Rect box = toRect(target->box) & inFrame;
-        if (!box.empty())
-            shown.push_back(
-                {target->trackId, box, kTargetRed, true, false, false, nullptr, "TARGET"});
     }
 
     if (options.trails)
-        for (const Shown& s : shown)
-            if (s.track) drawTrail(frame, *s.track, s.color, st);
-    for (const Shown& s : shown)
-        if (!s.target) drawBox(frame, s.box, s.color, s.predicted, st);
-    for (const Shown& s : shown)
-        if (s.target) drawTargetBox(frame, s.box, info.uptime, st);
+        for (const Shown& s : shown) drawTrail(frame, *s.track, s.color, st);
+    for (const Shown& s : shown) drawBox(frame, s.box, s.color, s.predicted, st);
 
-    // Tags: the target's first, then custom labels', then the oldest tracks'.
+    // Tags: custom labels' first, then the oldest tracks'.
     std::vector<size_t> order(shown.size());
     std::iota(order.begin(), order.end(), 0);
     std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
         const Shown &x = shown[a], &y = shown[b];
-        if (x.target != y.target) return x.target;
         if (x.labeled != y.labeled) return x.labeled;
         return x.id < y.id;
     });
@@ -565,23 +481,20 @@ void Overlay::draw(cv::Mat& frame, const std::vector<Track>& tracks, const Class
     std::vector<TagLayout::Item> items;
     for (size_t i : order) {
         const Shown& s = shown[i];
-        Tag tag{{s.name, st.font(16), s.target ? 700 : 600, kWhite}, {}, s.color, s.target};
-        if (options.debug && s.track)
+        Tag tag{{s.name, st.font(16), 600, kWhite}, {}, s.color};
+        if (options.debug)
             for (const std::string& line : debugLines(*s.track, s.predicted, options))
                 tag.details.push_back({line, st.font(12), 400, kSoft});
-        const cv::Rect box = s.target ? grown(s.box, targetMargin(st)) & inFrame : s.box;
-        items.push_back({s.id, box, measure(tag, metrics)});
+        items.push_back({s.id, s.box, measure(tag, metrics)});
         tags.push_back(std::move(tag));
     }
     const auto counts = countByClass(tracks, classes);
     std::vector<cv::Rect> reserved = {hud(frame, info, counts, options, st, false)};
-    if (target) reserved.push_back(lockBadge(frame, st, false));
     const std::vector<cv::Rect> spots = tags_.place(items, frame.size(), reserved);
     // Least important first, so if tags must overlap the important ones stay on top.
     for (size_t i = tags.size(); i-- > 0;) drawTag(frame, tags[i], spots[i], metrics, st);
 
     hud(frame, info, counts, options, st, true);
-    if (target) lockBadge(frame, st, true);
     if (options.help) drawHelp(frame, st);
     else drawHint(frame, info.uptime, st);
 }
