@@ -35,6 +35,36 @@ The user's call: "only focus on faces, hands, persons, and targets. Strip away a
 
 `--realtime` on `flashlight.mov`: 30.0 FPS with no skipped frames. Unit tests: 122. The only tracking difference from v2: on `hands_face` one person track ends 5 frames sooner, because weak "toothbrush" boxes no longer keep it alive.
 
+### Branches (2026-11-05)
+The user's call: "get rid of v2, rename v3 to flashlight targeting-base code". Done with branch operations (not commits):
+
+| Branch | What it is |
+|---|---|
+| `main` | the original tracker (2026-10-04) |
+| `flashlight-targeting-base` | was `v3`: people, faces, hands, the bright-light TARGET, face labels, and now face reinforcement (below) |
+| `laser-target` | `flashlight-targeting-base` with the laser TARGET instead of the bright light, and no hand detection |
+
+Deleted (all fully merged, checked with `git merge-base --is-ancestor` before `git branch -d`): `v2` and the work branches `v2-fixes`, `v2-labels-db`, `v2-merge`, `v2-tracking`, `v2-ui`, `fix-cleanups`, `fix-docs`, `fix-label-robustness`, `fix-sync-safety`, `fix2-grab-frames`, `fix2-label-startup`, `fix2-messages-stats`, `v3-detection`, `v3-face-labels`, `v3-merge`. Every commit they held is still in the history of `flashlight-targeting-base`. Where this document says "v2" or "v3" below, it means those versions as they were built.
+
+### Face reinforcement (2026-11-05, branch `face-reinforcement`, merged into `flashlight-targeting-base`)
+The user's call: "a neural network that actively reinforces recognition of a face. Periodically take a photo of that face and use it to reinforce recognizing THAT face". Chosen: auto-photos plus a trained network.
+- **Auto-photos:** while a person is recognized, a photo of their face is saved into their label folder (`labels/NAME/auto_<date>_<time>.jpg`) and its embedding (and mirrored one) joins the label at once; a record goes into `.embeddings.yml`, so the next start doesn't re-embed it and `--sync-labels` lists it like any photo (the user can delete it).
+- **Gates** (`capturePolicy`, a pure function): the label is stable (5 matching checks in a row); this check matches with score ≥ threshold + 0.05 and margin ≥ 0.1; the face was detected this frame; ≥ 80 px wide; sharp (variance of the Laplacian ≥ 15 on the middle of the face at 112 px, calibrated on the clips); not the TARGET, not lit, and not within 2 s after a light (the camera's exposure dip); new (similarity to the label's photos ≤ 0.85); at most one per label per 30 s and 40 per label, after which the most redundant auto-photo (never a user's photo) is replaced. Off with `--no-auto-photos` (which also stops collecting other faces) or `auto_photos: false` in a label's `label.yml`.
+- **FaceNet:** three averaged `cv::ml::ANN_MLP` networks, 128 → 32 → one output per label + "other", on SFace embeddings, each trained on 4 noisy copies of every sample and retrained until it fits its own data. (One network called 6–12% of never-seen synthetic people a label with p ≥ 0.9; the averaged three: 0–0.6%, with 97–100% of new views of a known person right.) Trained on the Reinforcer's background thread, never on the frame loop; saved in `labels/.face_net.yml` with the label names, the model id and a fingerprint of the data, and retrained when any changes.
+- **Other faces** (the "other" output) are embeddings, never photos, of tracks that never matched a label over at least 5 checks, kept when the track ends; at most 500, in `labels/.negatives.yml`. The network turns on only with 3 photos of every label and 20 other faces from at least 5 different tracks; until then recognition is exactly as before, and the startup line, `--list-labels`, `--sync-labels` and the debug view say why.
+- **In recognition:** the photo matching stays the rule. The network can relax it (p ≥ 0.9 for that label and the score within 0.08 below the threshold, still beating the runner-up by 0.05) or veto it (p ≥ 0.9 "other").
+- **Threads:** only the tracking thread touches the labels; the recognition worker only embeds; the Reinforcer gets copies, writes files and trains, and publishes each network as a `shared_ptr<const FaceNet>` that the Recognizer swaps in. A ThreadSanitizer build of the threaded tests reported nothing.
+- **Measured** (label `me` from only 3 face crops of `hands_face.mov`):
+
+| Run | `me` on face rows | first `me` | photos taken |
+|---|---|---|---|
+| `flashlight.mov`, before the branch | 98.9% | 0.63 s | — |
+| `hands_face.mov`, reinforcement on | 99.2% | 0.63 s | 2 (33 s apart; 3 more turned down as nothing new) |
+| `flashlight.mov` with the reinforced label | 98.9% (identical scores) | 0.63 s | 2 (outside the TARGET; 33 checks turned down as lit) |
+
+  No measurable gain on these clips: the 3-photo label was already at the ceiling (the unlabeled rows are the 0.63 s spent collecting 3 votes), and both new photos (fingers over the face) never rank among the 3 closest for `flashlight.mov`'s views. The network stayed off ("needs other faces, 0 of 20 seen"): both clips show one person, so its on state is only unit-tested. Every auto-photo showed the right face. Speed, hand IDs (4/4) and TARGET (8/0) unchanged; unit tests 122 → 166.
+- **Known risks / next steps:** a look-alike that the photos call alex clearly and steadily gets photographed as alex (the gates trust a clear match; the network can't then separate them). Faces a hand box overlaps could be skipped (both `hands_face` auto-photos have fingers over the face). Not checked: the network on real other people (no clip has a second person), long runs at the 40-photo and 500-face caps, the live camera.
+
 ### Laser TARGET (2026-10-26, branch `laser-target`, from `v3`)
 The user's call: TARGET comes from a red laser dot on the face, not a bright light, and the dot must be on the face itself, not just inside its detection box. The bright-light TARGET is replaced.
 - **Where the face is:** an oval from YuNet's 5 landmarks (forehead to chin, cheek to cheek, tilted with the eyes). Hands in front of it are cut out by their shape from the 7 palm keypoints, not their box (boxes of hands beside the face hid the cheek in 77 of 90 frames of the first test).
@@ -53,6 +83,7 @@ Still to do by the user, with the live camera (no clip covers these):
 - a live run: camera capture runs on a background thread now;
 - the UI polish overlay in a live window: the keys, pausing, the help panel, the pulsing TARGET corners;
 - enrolling a real object from 5–10 photos (v2), or a real face (v3);
+- live face reinforcement with the camera, and a second person in view so the network can turn on;
 - telling two different items of the same class apart.
 
 Each milestone section below starts with what was built and measured. The original plan text follows it.

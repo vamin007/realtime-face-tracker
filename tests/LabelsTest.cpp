@@ -66,6 +66,44 @@ TEST(Labels, MatchNeedsTheThresholdAndAClearWinner) {
     EXPECT_EQ(LabelLibrary("unused").match(unit({1, 0, 0}), 0.5f, 0.05f).label, -1) << "no labels";
 }
 
+TEST(Labels, MatchNamesTheClosestLabelEvenWithoutAMatch) {
+    LabelLibrary library("unused");
+    library.labels() = {makeLabel("alex", {sample({1, 0, 0})}),
+                        makeLabel("sam", {sample({0, 1, 0})})};
+    LabelMatch m = library.match(unit({0.3f, 0.4f, 1}), 0.5f, 0.05f);
+    EXPECT_EQ(m.label, -1) << "below the threshold";
+    EXPECT_EQ(m.best, 1);
+    EXPECT_NEAR(m.score, 0.4f / std::sqrt(1.25f), 1e-5);
+    m = library.match(unit({1, 0.05f, 0}), 0.5f, 0.05f);
+    EXPECT_EQ(m.label, 0);
+    EXPECT_EQ(m.best, 0);
+    EXPECT_EQ(LabelLibrary("unused").match(unit({1, 0, 0}), 0.5f, 0.05f).best, -1);
+}
+
+TEST(Labels, APhotosSamplesAreAddedAndRemovedInMemory) {
+    LabelLibrary library("unused");
+    library.labels() = {makeLabel("alex", {sample({1, 0})})};
+    PhotoRecord r;
+    r.file.name = "auto_20261104_090000.jpg";
+    r.used = true;
+    r.roi = {5, 6, 7, 8};
+    r.embedding = unit({1, 1});
+    r.mirrored = unit({1, -1});
+    library.addPhoto(0, r);
+    const CustomLabel& label = library.labels()[0];
+    ASSERT_EQ(label.samples.size(), 3u);
+    EXPECT_EQ(label.samples[1].image, r.file.name);
+    EXPECT_EQ(label.samples[1].roi, r.roi);
+    EXPECT_FALSE(label.samples[1].flipped);
+    EXPECT_EQ(label.samples[1].embedding, r.embedding);
+    EXPECT_TRUE(label.samples[2].flipped);
+    EXPECT_EQ(label.samples[2].embedding, r.mirrored);
+
+    library.removePhoto(0, r.file.name);
+    ASSERT_EQ(label.samples.size(), 1u);
+    EXPECT_EQ(label.samples[0].image, "photo.jpg");
+}
+
 TEST(Labels, SaveAndLoadRoundTrip) {
     const std::string dir = testing::TempDir() + "/labels_roundtrip";
     std::filesystem::remove_all(dir);
@@ -183,6 +221,43 @@ TEST(Labels, SettingsAreReadFromAHandWrittenFile) {
     EXPECT_FLOAT_EQ(s.threshold, 0.65f);
     EXPECT_TRUE(s.oldKeys.empty()) << "nothing but the threshold is written";
     std::filesystem::remove(path);
+}
+
+TEST(Labels, AutoPhotosCanBeTurnedOffInLabelYml) {
+    const std::string path = testing::TempDir() + "/label_settings_auto.yml";
+    auto read = [&](const std::string& text) {
+        std::ofstream(path) << text;
+        return readSettings(path);
+    };
+    EXPECT_TRUE(read("threshold: 0.5\n").autoPhotos) << "on unless turned off";
+    EXPECT_FALSE(read("auto_photos: false\n").autoPhotos);
+    EXPECT_TRUE(read("auto_photos: true\n").autoPhotos);
+    EXPECT_FALSE(read("auto_photos: 0\n").autoPhotos);
+    EXPECT_THROW(read("auto_photos: maybe\n"), std::runtime_error);
+    EXPECT_THROW(read("auto_photos: 2\n"), std::runtime_error);
+
+    writeSettings(path, {0.5f, false});
+    LabelSettings s = readSettings(path);
+    EXPECT_FALSE(s.autoPhotos);
+    EXPECT_FLOAT_EQ(s.threshold, 0.5f);
+    writeSettings(path, {0.5f, true});
+    std::ifstream in(path);
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(text.find("auto_photos"), std::string::npos) << "the default isn't written";
+    std::filesystem::remove(path);
+
+    // A label's setting reaches it, and save() keeps it.
+    const std::string dir = testing::TempDir() + "/labels_auto";
+    std::filesystem::remove_all(dir);
+    LabelLibrary library(dir);
+    CustomLabel label = makeLabel("alex", {sample({1, 0})});
+    label.autoPhotos = false;
+    library.save(label);
+    library.load();
+    ASSERT_EQ(library.labels().size(), 1u);
+    EXPECT_FALSE(library.labels()[0].autoPhotos);
+    EXPECT_FALSE(library.folders()[0].settings.autoPhotos);
+    std::filesystem::remove_all(dir);
 }
 
 // An earlier version also had object labels, set with class and whole_photo.

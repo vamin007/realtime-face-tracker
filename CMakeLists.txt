@@ -26,8 +26,10 @@ add_library(tracker_core STATIC
     src/Tracker.cpp
     src/Targeting.cpp
     src/Embedder.cpp
+    src/FaceNet.cpp
     src/Labels.cpp
     src/Recognizer.cpp
+    src/Reinforcement.cpp
     src/Enrollment.cpp
     src/Options.cpp
     src/Overlay.cpp
@@ -62,12 +64,14 @@ if(GTest_FOUND)
         tests/ClassRegistryTest.cpp
         tests/DetectorTest.cpp
         tests/EmbedderTest.cpp
+        tests/FaceNetTest.cpp
         tests/KalmanBoxTest.cpp
         tests/LabelsTest.cpp
         tests/LabelSyncTest.cpp
         tests/OptionsTest.cpp
         tests/OrtModelTest.cpp
         tests/OverlayTest.cpp
+        tests/ReinforcementTest.cpp
         tests/TagLayoutTest.cpp
         tests/TargetingTest.cpp
         tests/TrackerTest.cpp

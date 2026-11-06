@@ -19,17 +19,20 @@ struct CustomLabel {
     std::string model;                 // the embedding model its samples were made with
     float threshold = 0;               // similarity needed to recognize it; 0 = the model's default
     std::vector<LabelSample> samples;  // several photos: more angles and light, better recognition
+    bool autoPhotos = true;            // photos are taken of the face while it's recognized
 };
 
 struct LabelMatch {
     int label = -1;      // index into LabelLibrary::labels(); -1 if nothing matched
     float score = 0;     // the best label's score
     float runnerUp = 0;  // the next best label's score
+    int best = -1;       // the best label, matched or not; -1 if there are no labels
 };
 
 // label.yml in a label's folder: optional settings, written by hand.
 struct LabelSettings {
-    float threshold = 0;  // "threshold": similarity needed; 0 = the model's default
+    float threshold = 0;     // "threshold": similarity needed; 0 = the model's default
+    bool autoPhotos = true;  // "auto_photos": photos of the face are taken while it's recognized
     // Settings of an earlier version, which also had object labels. They aren't
     // used; a class other than face means the folder can't be a label.
     std::string oldClass;              // "class"
@@ -117,6 +120,10 @@ public:
     std::vector<CustomLabel>& labels() { return labels_; }
     const std::vector<CustomLabel>& labels() const { return labels_; }
     int find(const std::string& name) const;  // -1 if unknown
+    // Adds a photo's samples to a label in memory (its embedding and mirrored
+    // copy, as a sync would have), or removes them. Files aren't touched.
+    void addPhoto(int label, const PhotoRecord& record);
+    void removePhoto(int label, const std::string& image);
 
     const std::vector<LabelFolder>& folders() const { return folders_; }
     int findFolder(const std::string& name) const;  // -1 if there's no such folder
@@ -140,6 +147,10 @@ private:
 
 // Score of one label for an embedding: the mean of its 3 most similar samples.
 float labelScore(const CustomLabel& label, const Embedding& e);
+// The similarity a label needs: its own threshold, or `fallback` (the model's).
+inline float thresholdOf(const CustomLabel& label, float fallback) {
+    return label.threshold > 0 ? label.threshold : fallback;
+}
 
 // Label names become class names, so they're limited to letters, digits, _ and -.
 // TARGET, in any case, is the red box's tag, so it isn't a label name.
@@ -151,6 +162,9 @@ constexpr const char* kSettingsFile = "label.yml";
 constexpr const char* kCacheFile = ".embeddings.yml";
 constexpr const char* kOldLabelBackup = ".label-v1.yml";  // label.yml of an older version
 bool isPhotoName(const std::string& fileName);            // by extension
+// A photo the tracker took of a recognized face: auto_YYYYMMDD_HHMMSS.jpg,
+// perhaps with _2, _3, ... before the extension.
+bool isAutoPhotoName(const std::string& fileName);
 // Image files in a folder, sorted by name.
 std::vector<PhotoFile> listPhotos(const std::string& folder);
 
@@ -161,6 +175,12 @@ void writeSettings(const std::string& file, const LabelSettings& settings);
 // .embeddings.yml. Returns false (and an empty cache) if it's missing or unreadable.
 bool readCache(const std::string& file, LabelCache& cache);
 void writeCache(const std::string& file, const LabelCache& cache);
+// Adds a photo's record to a label folder's .embeddings.yml, as if a sync had
+// looked at it: its size and time are taken from the file. A record of the
+// same name is replaced, and `removed`'s (a photo deleted) is dropped. Returns
+// false if the folder has no cache to add to (it was never synced).
+bool appendPhotoRecord(const std::string& folder, PhotoRecord record,
+                       const std::string& removed = "");
 
 // Converts a folder made by an older version, whose label.yml held the
 // embeddings, keeping the old file as .label-v1.yml. An object label stays one

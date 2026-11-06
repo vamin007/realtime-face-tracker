@@ -25,7 +25,8 @@ struct Options {
     bool log = true;
     bool mirror = true;
     bool faces = true;
-    bool labels = true;  // recognize custom labels
+    bool labels = true;      // recognize custom labels
+    bool autoPhotos = true;  // photograph recognized faces for their label (and keep other faces)
     bool showTrail = false;
     bool debug = false;  // show laser and recognition details on the boxes
     std::string record;  // save the raw camera feed to this video file

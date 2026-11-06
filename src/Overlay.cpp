@@ -232,8 +232,9 @@ void drawTag(cv::Mat& img, const Tag& tag, const cv::Rect& r, const TagMetrics& 
     }
 }
 
-// Debug view: the detection confidence, why a face is or isn't the TARGET, and
-// how close the track is to a label.
+// Debug view: the detection confidence, why a face is or isn't the TARGET, how
+// close the track is to a label, what the face network says, and whether the
+// latest check took a photo for the label.
 std::vector<std::string> debugLines(const Track& t, bool predicted, const DrawOptions& options) {
     std::vector<std::string> lines;
     char buf[96];
@@ -258,6 +259,15 @@ std::vector<std::string> debugLines(const Track& t, bool predicted, const DrawOp
             std::snprintf(buf, sizeof(buf), "closest label %s %.2f", id->closest.c_str(),
                           id->closestScore);
             lines.push_back(buf);
+            // The face network's answer, or why it's off.
+            if (id->netProb >= 0) {
+                std::snprintf(buf, sizeof(buf), "network %s %.2f", id->netLabel.c_str(),
+                              id->netProb);
+                lines.push_back(buf);
+            } else if (!options.recognizer->netStatus().empty()) {
+                lines.push_back("network " + options.recognizer->netStatus());
+            }
+            if (!id->photo.empty()) lines.push_back("photo: " + id->photo);
         }
     }
     return lines;

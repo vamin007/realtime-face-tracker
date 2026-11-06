@@ -90,6 +90,8 @@ void printUsage() {
            "  --rename-label OLD NEW  rename a label\n"
            "  --remove-label NAME   move a label to labels/.removed/ (its photos are kept)\n"
            "  --no-labels           don't recognize labels\n"
+           "  --no-auto-photos      don't take photos of recognized faces for their label\n"
+           "                        (nor keep other faces for the face network)\n"
            "  --labels-dir DIR      where labels are kept (default labels/)\n"
            "\nModels:\n"
            "  --model PATH          YOLO, for people (default models/yolov8n_384x640.onnx)\n"
@@ -147,6 +149,7 @@ bool parseArgs(const std::vector<std::string>& args, Options& opt) {
             opt.renameLabel = next();
             opt.renameTo = next();
         } else if (arg == "--no-labels") opt.labels = false;
+        else if (arg == "--no-auto-photos") opt.autoPhotos = false;
         else if (arg == "--labels-dir") opt.labelsDir = next();
         else if (arg == "--model") opt.yoloModel = {next(), true};
         else if (arg == "--face-model") opt.faceModel = {next(), true};

@@ -27,6 +27,7 @@
 #include "Options.h"
 #include "Overlay.h"
 #include "Recognizer.h"
+#include "Reinforcement.h"
 #include "Targeting.h"
 #include "Tracker.h"
 #include "YoloDetector.h"
@@ -149,6 +150,23 @@ void dumpDetections(std::ofstream& out, long long frame, double tMs,
     }
 }
 
+// Faces with the laser dot on them now, or the TARGET: they look unlike
+// themselves, so recognition doesn't photograph them for their label.
+std::set<int> litFaces(const TargetSelector& targeting) {
+    std::set<int> lit;
+    for (const auto& [id, f] : targeting.faces())
+        if (f.onSince >= 0) lit.insert(id);
+    if (targeting.target().active()) lit.insert(targeting.target().trackId);
+    return lit;
+}
+
+// "Face network: off: needs other faces (0 of 20 seen); ...".
+void printFaceNet(const std::string& status) {
+    std::cout << "Face network: " << status;
+    if (status.rfind("on", 0) != 0) std::cout << "; recognition uses the photos alone";
+    std::cout << '\n';
+}
+
 void dumpLaser(std::ofstream& out, long long frame, double tMs, const TargetSelector& targeting) {
     for (const auto& [id, f] : targeting.faces()) {
         if (!f.checked) continue;  // not looked at this frame
@@ -180,6 +198,7 @@ int main(int argc, char** argv) try {
     }
     if (opt.listLabels) {
         listLabels(library);
+        if (!library.labels().empty()) printFaceNet(faceNetStatus(library, FaceEmbedder::kModelId));
         return 0;
     }
     if (!opt.removeLabel.empty()) {
@@ -217,6 +236,7 @@ int main(int argc, char** argv) try {
     }
     if (opt.syncLabels) {
         syncLabels(library, detector, classes, faceEmbedder, true);
+        if (!library.labels().empty()) printFaceNet(trainFaceNet(library, faceEmbedder.modelId()));
         return 0;
     }
     // Photos added to label folders since the last run are looked at now, for
@@ -250,12 +270,24 @@ int main(int argc, char** argv) try {
     for (const std::string& line : detector.summary()) std::cout << "  " << line << '\n';
     const ClassFilter filter = resolveClasses(opt.classes, classes, library);
 
+    // The reinforcer outlives the recognizer, which hands it the last faces it kept.
+    std::unique_ptr<Reinforcer> reinforcer;
     std::unique_ptr<Recognizer> recognizer;
     if (opt.labels && !library.labels().empty()) {
-        recognizer = std::make_unique<Recognizer>(library, classes, faceEmbedder);
+        reinforcer = std::make_unique<Reinforcer>(library.dir(),
+                                                  faceNetData(library, faceEmbedder.modelId()));
+        RecognizerParams params;
+        params.autoPhotos = opt.autoPhotos;
+        recognizer =
+            std::make_unique<Recognizer>(library, classes, faceEmbedder, params, reinforcer.get());
         std::cout << "Labels (faces):";
         for (const CustomLabel& label : library.labels()) std::cout << ' ' << label.name;
         std::cout << '\n';
+        printFaceNet(reinforcer->status());
+        if (opt.autoPhotos)
+            std::cout
+                << "Auto-photos: on (a recognized face, now and then, into its label's folder "
+                   "as auto_*.jpg; --no-auto-photos turns them off)\n";
     }
 
     Camera camera;
@@ -291,7 +323,8 @@ int main(int argc, char** argv) try {
     if (!opt.dumpLabels.empty() && recognizer) {
         labelDump.open(opt.dumpLabels);
         if (!labelDump) throw std::runtime_error("Failed to open " + opt.dumpLabels);
-        labelDump << "t,track,class,best_label,score,runner_up,match,assigned\n";
+        labelDump << "t,track,class,best_label,score,runner_up,match,assigned,net_label,net_prob,"
+                     "sharpness,photo\n";
         recognizer->setDebugStream(&labelDump);
     }
     if (!opt.saveFrames.empty()) fs::create_directories(opt.saveFrames);
@@ -363,10 +396,13 @@ int main(int argc, char** argv) try {
         tracker.update(detections, tMs / 1000.0);
         latency.add("track", msSince(t1));
         const auto t2 = Clock::now();
-        // Recognition copies crops and targeting looks for the laser's colors:
-        // both happen before anything is drawn on the frame.
-        if (recognizer) recognizer->update(frame, tracker.tracks(), tMs / 1000.0);
+        // Targeting looks for the laser's colors and recognition copies crops:
+        // both happen before anything is drawn on the frame. Targeting goes
+        // first, so recognition knows which faces the laser is on.
         if (opt.targeting) targeting.update(frame, tracker.tracks(), tMs / 1000.0);
+        if (recognizer)
+            recognizer->update(frame, tracker.tracks(), tMs / 1000.0,
+                               opt.targeting ? litFaces(targeting) : std::set<int>{});
         if (laserDump.is_open()) dumpLaser(laserDump, frameIndex, tMs, targeting);
         latency.add("labels+target", msSince(t2));
 
