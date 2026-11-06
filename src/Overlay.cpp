@@ -1,3 +1,8 @@
+// Overlay drawing. Everything is drawn straight onto the frame with OpenCV primitives:
+// translucent rounded panels (blended through small masks, so only their own region is touched),
+// boxes with corner marks, fading trails, name tags, the HUD, the lock badge, the help panel and
+// the startup hint. Sizes are designed for 720p and scaled by Style. Overlay::draw() at the end
+// decides what is shown and in which order; TagLayout decides where the tags go.
 #include "Overlay.h"
 
 #include <algorithm>
@@ -9,6 +14,7 @@
 
 namespace {
 
+// Colors are BGR (OpenCV's order). kTargetRed is the only red in the overlay: it means TARGET.
 const cv::Scalar kTargetRed(0, 0, 255);
 const cv::Scalar kWhite(255, 255, 255);
 const cv::Scalar kInk(30, 30, 30);      // dark text on light chips and key caps
@@ -22,6 +28,8 @@ const double kPi = 3.14159265358979;
 // the overlay reads the same at any resolution.
 struct Style {
     explicit Style(cv::Size frame) : scale(std::clamp(frame.height / 720.0, 0.5, 3.0)) {}
+    // px: a length designed for 720p, scaled to this frame (never below 1 pixel). font: the same
+    // for a text size, never below 10 pixels, which is about the smallest that stays readable.
     int px(double v) const { return std::max(1, static_cast<int>(std::lround(v * scale))); }
     int font(double v) const { return std::max(10, px(v)); }
     double scale;
@@ -32,6 +40,7 @@ cv::FontFace& font() {
     return face;
 }
 
+// Width in pixels of text drawn at this pixel size and weight (400 regular, 700 bold).
 int textWidth(const std::string& text, int size, int weight) {
     return cv::getTextSize(cv::Size(), text, cv::Point(), font(), size, weight).width;
 }
@@ -45,7 +54,9 @@ void drawText(cv::Mat& img, const std::string& text, cv::Point topLeft, const cv
 }
 
 // Moves the pixels of roi toward color by alpha * mask / 255. Translucent shapes
-// are blended through this, so they touch only their own small region.
+// are blended through this, so they touch only their own small region. roi shares its pixels
+// with the frame (a cv::Mat copy is only a new header), so this edits the frame in place. The
+// arithmetic is integer (alpha in 1/256 steps), which is fast enough to do every frame.
 void blend(cv::Mat roi, const cv::Mat& mask, const cv::Scalar& color, double alpha) {
     if (roi.type() != CV_8UC3) return;
     const int a = static_cast<int>(alpha * 256);
@@ -64,6 +75,9 @@ void blend(cv::Mat roi, const cv::Mat& mask, const cv::Scalar& color, double alp
 }
 
 // Fills r with rounded corners (top, bottom or both), blended at alpha (1 = opaque).
+// r may reach past the image; only the visible part is drawn. The shape is built as an
+// antialiased mask (a rectangle whose corners are cleared and redrawn as filled circles) and
+// then blended through blend().
 void fillRounded(cv::Mat& img, const cv::Rect& r, const cv::Scalar& color, double alpha, int radius,
                  bool roundTop = true, bool roundBottom = true) {
     const cv::Rect clip = r & cv::Rect(0, 0, img.cols, img.rows);
@@ -72,6 +86,8 @@ void fillRounded(cv::Mat& img, const cv::Rect& r, const cv::Scalar& color, doubl
     const cv::Rect s = r - clip.tl();  // r in the mask's coordinates
     cv::Mat mask(clip.size(), CV_8U, cv::Scalar(0));
     cv::rectangle(mask, s, cv::Scalar(255), cv::FILLED);
+    // round: clear the radius x radius square in a corner, then fill a circle there, which leaves
+    // that corner rounded.
     auto round = [&](int cornerX, int cornerY, int centerX, int centerY) {
         cv::rectangle(mask, cv::Rect(cornerX, cornerY, radius, radius), cv::Scalar(0), cv::FILLED);
         cv::circle(mask, {centerX, centerY}, radius, cv::Scalar(255), cv::FILLED, cv::LINE_AA);
@@ -88,11 +104,13 @@ void fillRounded(cv::Mat& img, const cv::Rect& r, const cv::Scalar& color, doubl
     blend(img(clip), mask, color, alpha);
 }
 
+// A float rectangle as a pixel rectangle (each value rounded).
 cv::Rect toRect(const cv::Rect2f& r) {
     return {static_cast<int>(std::lround(r.x)), static_cast<int>(std::lround(r.y)),
             static_cast<int>(std::lround(r.width)), static_cast<int>(std::lround(r.height))};
 }
 
+// r with `by` pixels added on every side.
 cv::Rect grown(const cv::Rect& r, int by) {
     return {r.x - by, r.y - by, r.width + 2 * by, r.height + 2 * by};
 }
@@ -129,11 +147,13 @@ void drawBox(cv::Mat& img, const cv::Rect& box, const cv::Scalar& color, bool pr
 }
 
 // The TARGET: a thick red box, with corner marks around it that pulse gently.
-// Its tag goes above the marks (targetFrame), not on them.
+// Its tag goes above the marks (placed against the box grown by targetMargin), not on them.
 int targetMargin(const Style& st) { return st.px(14); }
 
 void drawTargetBox(cv::Mat& img, const cv::Rect& box, double uptime, const Style& st) {
     cv::rectangle(img, box, kTargetRed, st.px(3));
+    // The marks move in and out 1.2 times a second. The pulse is a function of uptime, so it
+    // needs no state kept between frames.
     const double pulse = 0.5 + 0.5 * std::sin(2 * kPi * 1.2 * uptime);
     const int gap = targetMargin(st) - static_cast<int>(std::lround(st.px(5) * pulse));
     const int length =
@@ -146,6 +166,7 @@ void drawTargetBox(cv::Mat& img, const cv::Rect& box, double uptime, const Style
 void drawTrail(cv::Mat& img, const Track& t, const cv::Scalar& color, const Style& st) {
     const auto& pts = t.trail;
     if (pts.size() < 2) return;
+    // The trail's bounding box: the mask and the blend only cover that area, not the whole frame.
     float x0 = pts[0].x, y0 = pts[0].y, x1 = x0, y1 = y0;
     for (const cv::Point2f& p : pts) {
         x0 = std::min(x0, p.x), y0 = std::min(y0, p.y);
@@ -170,12 +191,14 @@ void drawTrail(cv::Mat& img, const Track& t, const cv::Scalar& color, const Styl
         if (cv::norm(pts[i] - pts[i - 1]) > jump) continue;
         const double age = static_cast<double>(i) / (pts.size() - 1);  // 1 = newest
         const int w = std::max(1, static_cast<int>(std::lround(thickness * (0.4 + 0.6 * age))));
+        // Older segments are thinner (40% to 100% of the width) and fainter (mask 30 to 255).
         cv::line(mask, fixed(pts[i - 1]), fixed(pts[i]), cv::Scalar(30 + 225 * age), w, cv::LINE_AA,
                  kShift);
     }
     blend(img(bounds), mask, color, 0.9);
 }
 
+// A piece of text with its style (size in pixels, weight, BGR color).
 struct Span {
     std::string text;
     int size, weight;
@@ -191,6 +214,8 @@ struct Tag {
     bool target = false;
 };
 
+// Paddings of a tag, scaled to the frame: inside the plate (padX, padY), the width of the color
+// stripe, and the gap between detail lines.
 struct TagMetrics {
     int padX, padY, stripe, gap;
     explicit TagMetrics(const Style& st)
@@ -199,6 +224,8 @@ struct TagMetrics {
 
 int nameHeight(const Tag& tag, const TagMetrics& m) { return tag.name.size + 2 * m.padY; }
 
+// The tag's size: the widest line plus padding (and the stripe, except on the TARGET's tag),
+// and the name's height plus the detail lines. TagLayout needs it to place the tag.
 cv::Size measure(const Tag& tag, const TagMetrics& m) {
     int w = textWidth(tag.name.text, tag.name.size, tag.name.weight), h = nameHeight(tag, m);
     for (const Span& d : tag.details) {
@@ -209,6 +236,9 @@ cv::Size measure(const Tag& tag, const TagMetrics& m) {
     return {w + 2 * m.padX + (tag.target ? 0 : m.stripe), h};
 }
 
+// Draws a tag in r (a spot from TagLayout, as big as measure() said). The TARGET's tag is solid
+// red behind its name, with any detail lines on a dark panel below; other tags are a translucent
+// dark plate with a stripe in the track's color.
 void drawTag(cv::Mat& img, const Tag& tag, const cv::Rect& r, const TagMetrics& m,
              const Style& st) {
     const int radius = st.px(4), head = nameHeight(tag, m);
@@ -441,6 +471,7 @@ void drawHelp(cv::Mat& img, const Style& st) {
 
 // "Press h for help" at the bottom for the first few seconds, then fading out.
 void drawHint(cv::Mat& img, double uptime, const Style& st) {
+    // Seconds the hint stays fully visible, then seconds it takes to fade out.
     const double show = 4.0, fade = 1.5;
     if (uptime >= show + fade) return;
     const int body = st.font(15), cap = st.px(22), padX = st.px(14), h = cap + st.px(12);
@@ -451,6 +482,7 @@ void drawHint(cv::Mat& img, double uptime, const Style& st) {
     const cv::Rect clip = r & cv::Rect(0, 0, img.cols, img.rows);
     if (clip.empty()) return;
     const double alpha = uptime <= show ? 1.0 : 1.0 - (uptime - show) / fade;
+    // To fade the hint out, keep what is under it and blend that back in at the end.
     const cv::Mat before = img(clip).clone();
     fillRounded(img, r, kPanel, 0.75, h / 2);
     int x = r.x + padX;
@@ -469,6 +501,7 @@ cv::Scalar trackColor(int id) {
     // Hue steps of 0.618 of the usable range (the golden ratio), so consecutive
     // ids look clearly different. OpenCV hue is 0..179, and red sits at both
     // ends: hues near it (and orange and pink) are skipped.
+    // Saturation and brightness are fixed, so every color is vivid and only the hue varies.
     const int hue = 18 + (id * 87) % 140;
     cv::Mat hsv(1, 1, CV_8UC3, cv::Scalar(hue, 190, 255)), bgr;
     cv::cvtColor(hsv, bgr, cv::COLOR_HSV2BGR);
@@ -508,6 +541,7 @@ void Overlay::draw(cv::Mat& frame, const std::vector<Track>& tracks, const Class
                                ? &options.targeting->target()
                                : nullptr;
 
+    // One thing to draw. track is null for the target's last known box (see below).
     struct Shown {
         int id;
         cv::Rect box;
@@ -536,7 +570,7 @@ void Overlay::draw(cv::Mat& frame, const std::vector<Track>& tracks, const Class
         shown.push_back(std::move(s));
     }
     // The target can be briefly undetected (its track then isn't visible): keep
-    // showing it on its last box.
+    // showing it on its last box, so the red box doesn't blink off during a drop-out.
     if (target && !targetShown) {
         const cv::Rect box = toRect(target->box) & inFrame;
         if (!box.empty())
@@ -544,6 +578,7 @@ void Overlay::draw(cv::Mat& frame, const std::vector<Track>& tracks, const Class
                 {target->trackId, box, kTargetRed, true, false, false, nullptr, "TARGET"});
     }
 
+    // Draw order: trails, then the ordinary boxes, then the target's, so the red box is on top.
     if (options.trails)
         for (const Shown& s : shown)
             if (s.track) drawTrail(frame, *s.track, s.color, st);
@@ -552,7 +587,8 @@ void Overlay::draw(cv::Mat& frame, const std::vector<Track>& tracks, const Class
     for (const Shown& s : shown)
         if (s.target) drawTargetBox(frame, s.box, info.uptime, st);
 
-    // Tags: the target's first, then custom labels', then the oldest tracks'.
+    // Tags: the target's first, then custom labels', then the oldest tracks'. Earlier tags get
+    // the better spots in TagLayout, so this order is their priority.
     std::vector<size_t> order(shown.size());
     std::iota(order.begin(), order.end(), 0);
     std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
@@ -570,17 +606,21 @@ void Overlay::draw(cv::Mat& frame, const std::vector<Track>& tracks, const Class
         if (options.debug && s.track)
             for (const std::string& line : debugLines(*s.track, s.predicted, options))
                 tag.details.push_back({line, st.font(12), 400, kSoft});
+        // The target's tag is placed against its box plus the corner marks around it.
         const cv::Rect box = s.target ? grown(s.box, targetMargin(st)) & inFrame : s.box;
         items.push_back({s.id, box, measure(tag, metrics)});
         tags.push_back(std::move(tag));
     }
     const auto counts = countByClass(tracks, classes);
+    // Areas the tags must keep off: the HUD panel and the lock badge. They are only measured
+    // here (paint = false) and painted after the tags.
     std::vector<cv::Rect> reserved = {hud(frame, info, counts, options, st, false)};
     if (target) reserved.push_back(lockBadge(frame, st, false));
     const std::vector<cv::Rect> spots = tags_.place(items, frame.size(), reserved);
     // Least important first, so if tags must overlap the important ones stay on top.
     for (size_t i = tags.size(); i-- > 0;) drawTag(frame, tags[i], spots[i], metrics, st);
 
+    // The HUD and the badge go on top of the tags.
     hud(frame, info, counts, options, st, true);
     if (target) lockBadge(frame, st, true);
     if (options.help) drawHelp(frame, st);

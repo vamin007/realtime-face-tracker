@@ -1,3 +1,6 @@
+// Tests for TagLayout: the default spot, staying inside the frame, no overlaps between nearby
+// tags, reserved areas, priority by order, and the settling rule that keeps a pushed tag from
+// hopping back and forth.
 #include <gtest/gtest.h>
 
 #include "TagLayout.h"
@@ -11,6 +14,7 @@ bool inside(const cv::Rect& r, cv::Size frame) { return (r & cv::Rect({0, 0}, fr
 
 }  // namespace
 
+// The best spot: right above the box's top-left corner (box y 300 minus tag height 24).
 TEST(TagLayout, ATagSitsOnTopOfItsBoxTopLeftCorner) {
     TagLayout layout;
     const auto spots = layout.place({{1, {400, 300, 200, 150}, kTag}}, kFrame);
@@ -18,6 +22,8 @@ TEST(TagLayout, ATagSitsOnTopOfItsBoxTopLeftCorner) {
     EXPECT_EQ(spots[0], cv::Rect(400, 276, 80, 24));
 }
 
+// Whatever the box's position, the tag is moved inside the frame (a tag bigger than the frame
+// goes to the origin).
 TEST(TagLayout, TagsStayInsideTheFrame) {
     TagLayout layout;
     const std::vector<TagLayout::Item> items = {
@@ -46,6 +52,7 @@ TEST(TagLayout, TagsOfNearbyBoxesDontOverlap) {
             EXPECT_TRUE((spots[i] & spots[j]).empty()) << i << " and " << j;
 }
 
+// A reserved rect (the HUD, say) is treated like a tag that is already placed.
 TEST(TagLayout, ReservedAreasAreAvoided) {
     TagLayout layout;
     const cv::Rect hud(12, 12, 300, 70);
@@ -54,6 +61,7 @@ TEST(TagLayout, ReservedAreasAreAvoided) {
     EXPECT_TRUE(inside(spots[0], kFrame));
 }
 
+// Two items with the same box: the first listed gets the best spot, the second another one.
 TEST(TagLayout, EarlierItemsGetTheBetterSpot) {
     TagLayout layout;
     const cv::Rect box(400, 300, 200, 150);
@@ -62,6 +70,7 @@ TEST(TagLayout, EarlierItemsGetTheBetterSpot) {
     EXPECT_TRUE((spots[0] & spots[1]).empty());
 }
 
+// After being pushed away, a tag waits kSettleFrames frames before returning to its best spot.
 TEST(TagLayout, APushedTagSettlesBeforeMovingBack) {
     TagLayout layout;
     const TagLayout::Item item{2, {400, 300, 200, 150}, kTag};
@@ -76,6 +85,7 @@ TEST(TagLayout, APushedTagSettlesBeforeMovingBack) {
     EXPECT_EQ(layout.place({item}, kFrame)[0], home);
 }
 
+// Even after settling, a tag returns only if its best spot is free with a margin around it.
 TEST(TagLayout, ATagMovesBackOnlyWithRoomToSpare) {
     TagLayout layout;
     const TagLayout::Item item{2, {400, 300, 200, 150}, kTag};

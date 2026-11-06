@@ -1,3 +1,6 @@
+// Tests for KalmanBox: the starting state, learning a velocity (independent of the frame rate),
+// damping, and the balance between smoothing detection jitter and snapping to fast motion,
+// including noisier (weak) measurements.
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -19,6 +22,7 @@ TEST(KalmanBox, StartsAtTheFirstBox) {
     EXPECT_FLOAT_EQ(kf.box().height, 20);
 }
 
+// 10 px per frame at 30 FPS is 300 px/s: the filter estimates that and extrapolates with it.
 TEST(KalmanBox, LearnsAConstantVelocity) {
     KalmanBox kf({0, 100, 50, 50}, {});
     for (int f = 1; f <= 30; ++f) {  // 300 px/s to the right
@@ -31,6 +35,8 @@ TEST(KalmanBox, LearnsAConstantVelocity) {
     EXPECT_NEAR(kf.box().x, 330, 5);
 }
 
+// The same motion sampled at 30 and at 15 FPS gives the same speed, because predict() is told
+// the real time step instead of assuming one frame.
 TEST(KalmanBox, UsesRealTimeBetweenFrames) {
     KalmanBox a({0, 0, 50, 50}, {}), b({0, 0, 50, 50}, {});
     for (int f = 1; f <= 30; ++f) {
@@ -44,6 +50,7 @@ TEST(KalmanBox, UsesRealTimeBetweenFrames) {
     EXPECT_NEAR(a.velocity().x, b.velocity().x, 20) << "speed must not depend on the frame rate";
 }
 
+// dampVelocity(0.5) halves the estimated speed.
 TEST(KalmanBox, DampingSlowsItDown) {
     KalmanBox kf({0, 100, 50, 50}, {});
     for (int f = 1; f <= 30; ++f) {

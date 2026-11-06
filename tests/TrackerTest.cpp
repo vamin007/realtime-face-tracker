@@ -1,3 +1,7 @@
+// Tests for Tracker on synthetic detections fed at 30 FPS (no neural network involved):
+// identity continuity (slow, fast and crossing objects, gaps), the track lifecycle (tentative,
+// confirmed, coasting, dropped), the weak-detection rules, per-class numbering, objects leaving
+// through the frame edge, and the shown box keeping up with fast motion.
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -12,6 +16,7 @@ namespace {
 constexpr double kFrame = 1.0 / 30;  // seconds between frames
 constexpr ClassId kPerson = 0;
 
+// A confident, square detection with its top-left corner at (x, y).
 Detection det(float x, float y, ClassId cls = kPerson, float size = 50, float conf = 0.9f) {
     Detection d;
     d.box = {x, y, size, size};
@@ -20,6 +25,7 @@ Detection det(float x, float y, ClassId cls = kPerson, float size = 50, float co
     return d;
 }
 
+// A weak (low-confidence) detection.
 Detection weakDet(float x, float y, ClassId cls = kPerson, float size = 50) {
     Detection d = det(x, y, cls, size, 0.2f);
     d.weak = true;
@@ -54,6 +60,7 @@ protected:
 
 }  // namespace
 
+// A new track stays hidden until it has been detected minHits (3) times.
 TEST_F(TrackerTest, TrackShownOnlyAfterMinHits) {
     Tracker tracker(classes);  // minHits = 3
     step(tracker, {det(100, 100)});
@@ -64,19 +71,22 @@ TEST_F(TrackerTest, TrackShownOnlyAfterMinHits) {
     EXPECT_EQ(visibleIds(tracker).size(), 1u);
 }
 
+// Boxes overlap from frame to frame, so plain overlap matching is enough.
 TEST_F(TrackerTest, SlowMovingObjectKeepsOneId) {
     Tracker tracker(classes);
     for (int f = 0; f < 60; ++f) step(tracker, {det(100 + 5.0f * f, 200)});
     EXPECT_EQ(seen_.size(), 1u);
 }
 
-// A small box moving 30 px per frame barely overlaps its last position.
+// A small box moving 30 px per frame barely overlaps its last position, so matching leans on
+// the center distance and on the Kalman filter's prediction of where the box goes next.
 TEST_F(TrackerTest, FastSmallObjectKeepsOneId) {
     Tracker tracker(classes);
     for (int f = 0; f < 30; ++f) step(tracker, {det(50 + 30.0f * f, 200, kPerson, 40)});
     EXPECT_EQ(seen_.size(), 1u);
 }
 
+// A third of a second without detections is well inside the lost timeout (2 s).
 TEST_F(TrackerTest, ShortGapKeepsId) {
     Tracker tracker(classes);
     for (int f = 0; f < 10; ++f) step(tracker, {det(300, 300)});
@@ -85,6 +95,8 @@ TEST_F(TrackerTest, ShortGapKeepsId) {
     EXPECT_EQ(seen_.size(), 1u);
 }
 
+// The distance a lost track may be matched at grows with the time unseen, so an object that
+// kept moving is found again further along.
 TEST_F(TrackerTest, MovingObjectReappearsAfterGap) {
     Tracker tracker(classes);
     int f = 0;
@@ -106,6 +118,7 @@ TEST_F(TrackerTest, ObjectThatStopsWhileHiddenKeepsId) {
     EXPECT_EQ(seen_.size(), 1u);
 }
 
+// A track detected only once never became real: it goes after tentativeTimeout (0.1 s).
 TEST_F(TrackerTest, UnconfirmedTrackDroppedAfterGap) {
     Tracker tracker(classes);
     step(tracker, {det(100, 100)});
@@ -123,6 +136,8 @@ TEST_F(TrackerTest, ConfirmedTrackDroppedAfterLostTimeout) {
     EXPECT_TRUE(tracker.tracks().empty());
 }
 
+// Leaving through the frame edge: the cut-off box shrinks, and the longer exitTimeout (3 s)
+// keeps the track for the object's return.
 TEST_F(TrackerTest, ObjectThatLeavesAndComesBackKeepsId) {
     Tracker tracker(classes);
     tracker.setFrameSize({1280, 720});
@@ -139,6 +154,8 @@ TEST_F(TrackerTest, ObjectThatLeavesAndComesBackKeepsId) {
     EXPECT_EQ(seen_.size(), 1u) << "came back where it left, within the exit timeout";
 }
 
+// A huge weak box must not match the track and stretch it (the size-ratio and overlap limits
+// refuse the pair).
 TEST_F(TrackerTest, JunkBoxesDontInflateATrack) {
     Tracker tracker(classes);
     tracker.setFrameSize({1280, 720});
@@ -150,6 +167,7 @@ TEST_F(TrackerTest, JunkBoxesDontInflateATrack) {
     for (const Track& t : tracker.tracks()) EXPECT_LT(t.box.width, 400) << "track " << t.id;
 }
 
+// A track stays shown for coastTime (0.2 s) after its last detection, then is hidden.
 TEST_F(TrackerTest, BoxStaysVisibleThroughBriefDropOut) {
     Tracker tracker(classes);
     for (int f = 0; f < 5; ++f) step(tracker, {det(100, 100)});
@@ -160,6 +178,7 @@ TEST_F(TrackerTest, BoxStaysVisibleThroughBriefDropOut) {
     EXPECT_TRUE(visibleIds(tracker).empty()) << "hidden after the coast time";
 }
 
+// The same box as a person and as a face makes two separate tracks (class gating).
 TEST_F(TrackerTest, PeopleAndFacesNeverShareATrack) {
     Tracker tracker(classes);
     for (int f = 0; f < 5; ++f)
@@ -208,6 +227,7 @@ TEST_F(TrackerTest, WeaklySeenFaceStaysVisibleLonger) {
     EXPECT_EQ(seen_.size(), 1u) << "a confident detection brings back the same track";
 }
 
+// Two heavily overlapping boxes on one object (IoU above duplicateIou) start only one track.
 TEST_F(TrackerTest, DuplicateBoxesMakeOneTrack) {
     Tracker tracker(classes);
     for (int f = 0; f < 10; ++f)
@@ -222,6 +242,8 @@ TEST_F(TrackerTest, TwoSeparateObjectsKeepTheirIds) {
     EXPECT_EQ(seen_.size(), 2u);
 }
 
+// Two objects pass each other 30 px apart. Their ids must not swap: matching works with each
+// track's predicted position, which carries on in its direction of travel.
 TEST_F(TrackerTest, CrossingObjectsKeepTheirIds) {
     Tracker tracker(classes);
     for (int f = 0; f < 50; ++f)
@@ -256,6 +278,7 @@ TEST_F(TrackerTest, BriefFalseDetectionsDontUseNumbers) {
         if (isVisible(t)) EXPECT_EQ(t.number, 1);
 }
 
+// After the first person times out, the next one is #2, not #1 again.
 TEST_F(TrackerTest, NumbersAreNotReused) {
     Tracker tracker(classes);
     for (int f = 0; f < 5; ++f) step(tracker, {det(100, 100)});

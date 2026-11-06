@@ -1,3 +1,6 @@
+// Tests for the overlay: the view keys, track colors, per-class counts, that red appears only
+// for the TARGET, and that drawing works at any frame size. They check properties of the drawn
+// pixels, not exact images.
 #include <gtest/gtest.h>
 
 #include <opencv2/imgproc.hpp>
@@ -6,6 +9,7 @@
 
 namespace {
 
+// A confirmed, matched track with a short trail.
 Track makeTrack(int id, int number, ClassId cls, const cv::Rect2f& box, bool visible = true) {
     Track t;
     t.id = id;
@@ -29,6 +33,8 @@ int redPixels(const cv::Mat& frame) {
 class OverlayTest : public ::testing::Test {
 protected:
     ClassRegistry classes;  // person, face
+    // A person, a face, a second person and face, and a hidden face (not visible, so it must be
+    // neither drawn nor counted).
     std::vector<Track> crowd() const {
         return {makeTrack(1, 1, classes.person(), {300, 150, 700, 570}),
                 makeTrack(2, 1, classes.face(), {540, 200, 200, 260}),
@@ -55,6 +61,7 @@ TEST(Overlay, ViewKeysToggleTheirOption) {
     EXPECT_FALSE(applyViewKey(-1, options));  // no key
 }
 
+// Over 1000 ids, no color's hue comes near red.
 TEST(Overlay, TrackColorsAreNeverRed) {
     for (int id = 1; id <= 1000; ++id) {
         cv::Mat bgr(1, 1, CV_8UC3, trackColor(id)), hsv;
@@ -72,6 +79,8 @@ TEST_F(OverlayTest, CountsVisibleTracksPerClass) {
     EXPECT_EQ(counts, expected);
 }
 
+// Red is reserved: none at all without a target; with one, it appears only around the target's
+// box, corner marks and tag, and in the TARGET LOCKED badge.
 TEST_F(OverlayTest, OnlyTheTargetIsRed) {
     const cv::Mat empty(720, 1280, CV_8UC3, cv::Scalar(90, 90, 90));
     DrawOptions options;
@@ -119,6 +128,7 @@ TEST_F(OverlayTest, OnlyTheTargetIsRed) {
     EXPECT_EQ(redPixels(outside), 0);
 }
 
+// Smoke test: tags, panels and the help box are larger than a tiny frame; drawing must not throw.
 TEST_F(OverlayTest, DrawsOnAnyFrameSize) {
     DrawOptions options;
     options.trails = options.debug = options.help = true;

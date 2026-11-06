@@ -1,3 +1,7 @@
+// Laser-dot search and target timing. findLaserDot() is the image analysis: a laser ADDS light, so
+// a dot is a small round patch whose red has risen above the skin right around it (and glows,
+// unlike pigment), sitting on the face itself. TargetSelector::update() is the state machine that
+// turns the per-frame results into a stable TARGET. See Targeting.h for the overview.
 #include "Targeting.h"
 
 #include <algorithm>
@@ -10,7 +14,8 @@ namespace {
 constexpr int kMinSkinPixels = 50;  // fewer face pixels than this: too small to judge
 // Eyes-to-mouth distance over eye distance. A face measures 0.9-1.3; when hands
 // cover it, YuNet's landmarks go astray (2-10 measured) and an oval built from
-// them is a sliver that can reach off the face onto the wall.
+// them is a sliver that can reach off the face onto the wall. (YuNet is the face detector that
+// provides the landmarks.)
 constexpr float kMinFaceShape = 0.6f, kMaxFaceShape = 1.7f;
 // Bright skin leaves a laser's red little room to rise below 255. The rise and
 // gain a dot pixel needs shrink with that room: the rise to the room up to this
@@ -24,12 +29,15 @@ constexpr int kMinRoom = 15;
 constexpr float kMinWindow = 15;  // px: the smallest window the skin around a pixel is taken from
 constexpr int kCoarse = 4;        // ... at this fraction of the resolution
 constexpr double kSlack = 1e-6;   // frame times are sums of floating-point steps
+// (kCoarse is a divisor: a quarter of the resolution. kSlack gives time comparisons a hair of
+// leeway: a dot seen for exactly enterTime must count even if rounding leaves it a bit short.)
 
 cv::Rect frameRect(const cv::Mat& frame) { return {0, 0, frame.cols, frame.rows}; }
 
 float length(cv::Point2f v) { return std::sqrt(v.x * v.x + v.y * v.y); }
 
-// The median of values counted in a histogram.
+// The median of values counted in a histogram: counts[v] is how many values equal v (v in
+// 0..bins-1) and total is their sum. Cheaper than sorting every pixel of the face.
 int medianOf(const int* counts, int bins, int total) {
     for (int v = 0, seen = 0; v < bins; ++v) {
         seen += counts[v];
@@ -38,6 +46,7 @@ int medianOf(const int* counts, int bins, int total) {
     return bins - 1;
 }
 
+// The median of a list of values (reorders the list).
 int median(std::vector<int>& values) {
     std::nth_element(values.begin(), values.begin() + values.size() / 2, values.end());
     return values[values.size() / 2];
@@ -46,30 +55,40 @@ int median(std::vector<int>& values) {
 }  // namespace
 
 cv::RotatedRect faceOval(const cv::Rect2f& box, const std::vector<cv::Point2f>& landmarks) {
+    // landmarks: right eye, left eye, nose, right and left mouth corner (indices 0-4).
     if (landmarks.size() >= 5) {
+        // The eye line and the middles of the eyes and of the mouth.
         cv::Point2f eyes = landmarks[1] - landmarks[0];
         if (eyes.x < 0) eyes = -eyes;  // left to right in the image, mirrored or not
         const cv::Point2f eyeMid = (landmarks[0] + landmarks[1]) * 0.5f;
         const cv::Point2f mouthMid = (landmarks[3] + landmarks[4]) * 0.5f;
         const float eyeDist = length(eyes);
         const float eyesToMouth = length(mouthMid - eyeMid);
+        // Only trust landmarks shaped like a face: eyes and mouth apart, and the
+        // eyes-to-mouth distance in proportion to the eye distance.
         if (eyeDist >= 2 && eyesToMouth >= 2 && eyesToMouth >= kMinFaceShape * eyeDist &&
             eyesToMouth <= kMaxFaceShape * eyeDist) {
+            // Unit vector from the mouth toward the eyes: up the face, even for a tilted head.
             const cv::Point2f up = (eyeMid - mouthMid) * (1 / eyesToMouth);
             // Forehead: about one eyes-to-mouth distance above the eyes; chin:
             // 0.6 of it below the mouth; cheeks: one eye distance out from the middle.
             const cv::Point2f top = eyeMid + up * eyesToMouth;
             const cv::Point2f bottom = mouthMid - up * (0.6f * eyesToMouth);
+            // The oval's tilt follows the eye line (degrees, as cv::RotatedRect wants it).
             const float angle = std::atan2(eyes.y, eyes.x) * 180 / static_cast<float>(CV_PI);
             return {(top + bottom) * 0.5f, cv::Size2f(2 * eyeDist, length(top - bottom)), angle};
         }
     }
+    // Fallback: an oval inside the middle of the box (three quarters wide, nine tenths tall), which
+    // leaves out the box's corners, where hair and background show.
     return {cv::Point2f(box.x + box.width / 2, box.y + box.height / 2),
             cv::Size2f(box.width * 0.75f, box.height * 0.9f), 0};
 }
 
 LaserDot findLaserDot(const cv::Mat& frame, const cv::RotatedRect& oval, const cv::Rect2f& box,
                       const TargetParams& params) {
+    // Work only on the part of the frame that can hold the dot: the oval's bounding box, cut to the
+    // detection box and the frame (a face may be partly outside it).
     const cv::Rect roi = oval.boundingRect() & cv::Rect(box) & frameRect(frame);
     if (roi.area() <= 0) return {};
     const cv::Mat img = frame(roi);
@@ -82,6 +101,7 @@ LaserDot findLaserDot(const cv::Mat& frame, const cv::RotatedRect& oval, const c
 
     // The skin's typical color: the median of each channel. A dot is a handful
     // of pixels, so it barely moves a median.
+    // One 256-bin histogram per channel (B, G, R) over the face's pixels.
     std::array<std::array<int, 256>, 3> channel{};
     int total = 0;
     for (int y = 0; y < img.rows; ++y) {
@@ -108,11 +128,15 @@ LaserDot findLaserDot(const cv::Mat& frame, const cv::RotatedRect& oval, const c
     filled.setTo(cv::Scalar(skin[0], skin[1], skin[2]), face == 0);
     cv::resize(filled, small, cv::Size(), 1.0 / kCoarse, 1.0 / kCoarse, cv::INTER_AREA);
     const float window = std::max(kMinWindow, 0.2f * oval.size.width) / kCoarse;
+    // medianBlur needs an odd kernel size, at least 3.
     cv::medianBlur(small, small, std::max(3, static_cast<int>(window)) | 1);
+    // Back to full size: nearby(x, y) is the skin color around pixel (x, y).
     cv::resize(small, nearby, img.size(), 0, 0, cv::INTER_LINEAR);
 
     // Dot pixels: red risen well above the skin's around it, and much more than
     // green and blue (on bright skin: as far as there is room).
+    // gain: how much more the red of pixel p rose above the local skin s than its green and blue
+    // (the larger of the two) did. A laser adds much more red than anything else.
     auto gain = [](const cv::Vec3b& p, const cv::Vec3b& s) {
         return (p[2] - s[2]) - std::max(p[1] - s[1], p[0] - s[0]);
     };
@@ -126,18 +150,25 @@ LaserDot findLaserDot(const cv::Mat& frame, const cv::RotatedRect& oval, const c
         uchar* c = coreMask.ptr<uchar>(y);
         for (int x = 0; x < img.cols; ++x) {
             if (!m[x]) continue;
+            // room: how far the local skin's red can still rise. A dot can't add more than that.
             const int room = 255 - kSaturationSlack - s[x][2];
+            // A red pixel needs enough room, and a red rise and gain that shrink with the room
+            // (bright skin leaves little). A saturated pixel that fails this goes to the
+            // overexposed mask instead.
             if (room >= kMinRoom && p[x][2] - s[x][2] >= std::min<int>(params.minRedRise, room) &&
                 gain(p[x], s[x]) >= std::min<int>(params.minRedGain, std::max(room / 2, kMinGain)))
                 r[x] = 255;
             else if (p[x][2] >= params.saturated) c[x] = 255;
         }
     }
+    // No red pixels at all: no dot.
     if (cv::countNonZero(redMask) == 0) return {};
     // Overexposed patches touching red pixels join them, whole: a dot's white
     // middle can be wider than its red rim.
     cv::Mat coreLabels, nearRed;
+    // Label each overexposed patch (label 0 is everything else) ...
     const int cores = cv::connectedComponents(coreMask, coreLabels, 8, CV_32S);
+    // ... and find the patches that touch a red pixel (red grown by one pixel).
     cv::dilate(redMask, nearRed, cv::Mat());
     std::vector<bool> joins(cores, false);
     for (int y = 0; y < img.rows; ++y)
@@ -149,13 +180,18 @@ LaserDot findLaserDot(const cv::Mat& frame, const cv::RotatedRect& oval, const c
         for (int x = 0; x < img.cols; ++x)
             if (joins[coreLabels.at<int>(y, x)]) dotMask.at<uchar>(y, x) = 255;
 
+    // Group the dot pixels into 8-connected blobs and judge each: size, shape, color, surroundings.
     cv::Mat labels, stats, centroids;
     const int n = cv::connectedComponentsWithStats(dotMask, labels, stats, centroids, 8, CV_32S);
+    // The size limit is a share of the face, so it scales with how large the face is in the image.
     const float maxArea = params.maxAreaShare * static_cast<float>(total);
     LaserDot best;
     for (int i = 1; i < n; ++i) {
         const int area = stats.at<int>(i, cv::CC_STAT_AREA);
         const int w = stats.at<int>(i, cv::CC_STAT_WIDTH), h = stats.at<int>(i, cv::CC_STAT_HEIGHT);
+        // A dot is small, compact and roughly round. Reject blobs that are too small (noise),
+        // too big (red clothes, a sticker, a lit patch of skin), sparse inside their bounding
+        // box, or long and thin (a streak or an edge).
         if (area < params.minArea || area > maxArea) continue;
         if (static_cast<float>(area) / (w * h) < params.minFill) continue;
         if (static_cast<float>(std::max(w, h)) / std::min(w, h) > params.maxElongation) continue;
@@ -163,6 +199,7 @@ LaserDot findLaserDot(const cv::Mat& frame, const cv::RotatedRect& oval, const c
         // Its red pixels' gain (the white middle has none to speak of), its
         // brightest red, and its mean green and blue.
         const cv::Rect bb(stats.at<int>(i, cv::CC_STAT_LEFT), stats.at<int>(i, cv::CC_STAT_TOP), w, h);
+        // white counts pixels with every channel at or above whiteLevel (the overexposed middle).
         double gainSum = 0;
         int redCount = 0, peakRed = 0, white = 0;
         cv::Vec2d greenBlue(0, 0);
@@ -178,17 +215,23 @@ LaserDot findLaserDot(const cv::Mat& frame, const cv::RotatedRect& oval, const c
                     ++redCount;
                 }
             }
+        // A lone red pixel is noise.
         if (redCount < 2) continue;
+        // The blob's center, still in the ROI's coordinates.
         const cv::Point2f c(static_cast<float>(centroids.at<double>(i, 0)),
                             static_cast<float>(centroids.at<double>(i, 1)));
         // On skin whose red has little room left, a laser shows mostly as an
         // overexposed spot: green and blue saturate in its middle too. Lit lips
-        // don't.
+        // don't. (Less room than minRedRise means the skin there is that bright.)
         const int room = 255 - kSaturationSlack - nearby.at<cv::Vec3b>(cv::Point(c))[2];
         if (room < params.minRedRise && white == 0) continue;
 
         // On the face itself: the ring around the dot (past its glow) must be
         // mostly this face's skin, inside the oval and the box.
+        // The ring runs from just past the dot's own glow (twice its radius) out to four radii, at
+        // least 4 px wide. Ring pixels that are off the face (hair, background, outside the oval or
+        // the frame) or not skin-colored count as not skin: a dot on an ear, the hairline or the
+        // wall behind the head has a ring that is mostly not skin.
         const float radius = std::max(w, h) / 2.0f;
         const float inner = 2 * radius + 1, outer = std::max(4 * radius, inner + 4);
         int ring = 0, skinRing = 0;
@@ -201,6 +244,7 @@ LaserDot findLaserDot(const cv::Mat& frame, const cv::RotatedRect& oval, const c
                 if (x < 0 || y < 0 || x >= img.cols || y >= img.rows || !face.at<uchar>(y, x))
                     continue;
                 const cv::Vec3b p = img.at<cv::Vec3b>(y, x);
+                // like: within skinTolerance of the face's median color in every channel.
                 bool like = true;
                 for (int ch = 0; ch < 3; ++ch) {
                     like = like && std::abs(int(p[ch]) - skin[ch]) <= params.skinTolerance;
@@ -213,15 +257,19 @@ LaserDot findLaserDot(const cv::Mat& frame, const cv::RotatedRect& oval, const c
 
         // It glows: light only adds. Its red is brighter than the skin right
         // around it, and its green and blue aren't darker (as a red mark's are).
+        // The ring's median colors, to compare the dot with.
         const int ringBlue = median(around[0]), ringGreen = median(around[1]),
                   ringRed = median(around[2]);
         const float glow = static_cast<float>(peakRed - ringRed);
         if (glow < params.minGlow && peakRed < params.saturated) continue;
+        // Mean green and blue over the whole blob.
         greenBlue *= 1.0 / area;
         if (ringGreen - greenBlue[0] > params.maxDarker ||
             ringBlue - greenBlue[1] > params.maxDarker)
             continue;
 
+        // Score: the red pixels' mean gain (a stronger laser scores higher). The best candidate
+        // wins; its position goes back from the ROI to frame coordinates.
         const float r = static_cast<float>(gainSum / redCount);
         const cv::Point2f offset(static_cast<float>(roi.x), static_cast<float>(roi.y));
         if (!best.found || r > best.redness) best = {true, c + offset, area, r, glow, skinAround};
@@ -232,12 +280,14 @@ LaserDot findLaserDot(const cv::Mat& frame, const cv::RotatedRect& oval, const c
 TargetSelector::TargetSelector(const ClassRegistry& classes, TargetParams params)
     : classes_(classes), params_(params) {}
 
+// A custom label (e.g. "me") counts as a face through its base class.
 bool TargetSelector::isFace(const Track& t) const {
     return classes_.kind(classes_.base(t.classId)) == ClassKind::Face;
 }
 
 // The dot was actually seen over at least enterTime (not just first seen that
-// long ago) and is still there.
+// long ago) and is still there: its last sighting is no older than dropTime, so a camera that
+// misses the dot for a frame or two doesn't end it.
 bool TargetSelector::dotOn(const FaceLaser& f, double now) const {
     return f.onSince >= 0 && f.lastDot - f.onSince >= params_.enterTime - kSlack &&
            now - f.lastDot <= params_.dropTime;
@@ -245,8 +295,10 @@ bool TargetSelector::dotOn(const FaceLaser& f, double now) const {
 
 const Target& TargetSelector::update(const cv::Mat& frame, const std::vector<Track>& tracks,
                                      double now) {
+    // dt: time since the previous update, added to a face's `missing` clock below.
     const double dt = lastUpdate_ >= 0 ? now - lastUpdate_ : 0;
     lastUpdate_ = now;
+    // Each frame starts with no result; the timing state (onSince, lastDot, missing) carries over.
     for (auto& [id, f] : faces_) {
         f.checked = false;
         f.dot = {};
@@ -260,12 +312,15 @@ const Target& TargetSelector::update(const cv::Mat& frame, const std::vector<Tra
         f.checked = t.matched;
         if (!t.matched) continue;
         f.dot = findLaserDot(frame, faceOval(t.detected, t.keypoints), t.detected, params_);
+        // A new run of sightings starts when there is none, or the last sighting is older than
+        // dropTime (a camera miss is shorter than that and doesn't restart the enterTime clock).
         if (f.dot.found) {
             if (f.onSince < 0 || now - f.lastDot > params_.dropTime) f.onSince = now;
             f.lastDot = now;
             f.missing = 0;
         } else {
             f.missing += dt;  // looked at, and it wasn't there
+            // The run ends only once the dot has been gone longer than dropTime.
             if (f.onSince >= 0 && now - f.lastDot > params_.dropTime) f.onSince = -1;
         }
     }
@@ -283,14 +338,18 @@ const Target& TargetSelector::update(const cv::Mat& frame, const std::vector<Tra
         if (t.id == target_.trackId) current = &t;
     if (current) {
         const FaceLaser& f = faces_[current->id];
+        // Remember when the target's face was last actually detected.
         if (f.checked) targetSeen_ = now;
+        // released: the face was looked at without the dot for over releaseTime (frames where the
+        // face was not detected don't add to it). lostTooLong: no detection of it for coastTime.
         const bool released = f.missing > params_.releaseTime + kSlack;
         const bool lostTooLong = now - targetSeen_ > params_.coastTime;
         if (released || lostTooLong) current = nullptr;
     }
 
     // 3. A face the dot has stayed on becomes the target; it takes over from the
-    //    current one once the dot has left that.
+    //    current one once the dot has left that. While the dot is on both, the current target
+    //    keeps it (no flip-flopping); among several new candidates, the stronger dot wins.
     const Track* best = nullptr;
     for (const Track& t : tracks) {
         if (!t.visible || !isFace(t) || !dotOn(faces_[t.id], now)) continue;
@@ -301,6 +360,7 @@ const Target& TargetSelector::update(const cv::Mat& frame, const std::vector<Tra
         targetSeen_ = now;
     }
 
+    // The target's box is its track's current (filtered) box.
     target_ = current ? Target{current->id, current->box} : Target{};
     return target_;
 }
