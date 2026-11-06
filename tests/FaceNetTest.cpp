@@ -1,5 +1,7 @@
 // The face network on synthetic embeddings: clusters of unit vectors stand in
 // for the SFace embeddings of different people (nearly orthogonal in 128-d).
+// Covers: staying off with too little data, telling the labels from each other and from
+// strangers, repeatable training, saving and loading, and noticing a stale network.
 
 #include <gtest/gtest.h>
 
@@ -138,6 +140,7 @@ TEST(FaceNet, ANewPersonIsntTakenForALabel) {
     EXPECT_EQ(sure, 0) << "never seen, so never confidently alex or sam";
 }
 
+// Training is seeded, so the same data gives the same networks and the same answers.
 TEST(FaceNet, TrainingIsRepeatable) {
     Scene s;
     FaceNet a, b;
@@ -169,6 +172,7 @@ TEST(FaceNet, SavedAndLoadedItPredictsTheSame) {
         for (size_t i = 0; i < p.size(); ++i) EXPECT_NEAR(p[i], q[i], 1e-5);
     }
 
+    // A damaged file loads as "off" rather than throwing.
     std::ofstream(file) << "not: [a network";
     EXPECT_FALSE(loaded.load(file));
     EXPECT_FALSE(loaded.on());
@@ -176,6 +180,8 @@ TEST(FaceNet, SavedAndLoadedItPredictsTheSame) {
     EXPECT_FALSE(loaded.load(file)) << "no file";
 }
 
+// trainedOn(): exactly this data (by fingerprint). fits(): the same labels and model, so its
+// outputs still mean something even if a photo was added since.
 TEST(FaceNet, KnowsWhetherItWasTrainedOnTheCurrentLabels) {
     Scene s;
     FaceNet net;

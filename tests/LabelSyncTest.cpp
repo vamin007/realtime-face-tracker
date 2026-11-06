@@ -1,6 +1,9 @@
 // Label folders end to end: syncing, enrolling, renaming, removing and
 // converting labels of earlier versions, with stand-in models so the tests run
-// in milliseconds.
+// in milliseconds. The stand-ins: RedFaceDetector calls a red rectangle in a generated photo a
+// face, and ColorEmbedder embeds a crop as its mean color. ("An earlier version" is the one
+// that also had object labels; this version still reads its face labels and leaves its object
+// labels alone.)
 
 #include <gtest/gtest.h>
 
@@ -106,6 +109,8 @@ std::string oldSettings(const std::string& cls, bool wholePhoto = false) {
            cls + "\nwhole_photo: " + (wholePhoto ? "true" : "false") + "\nthreshold: 0.\n";
 }
 
+// Each test gets a fresh labels directory under the temp dir and a Detector holding the
+// stand-in models.
 class LabelSync : public testing::Test {
 protected:
     void SetUp() override {
@@ -389,6 +394,8 @@ TEST_F(LabelSync, PhotosThatCantBeReadAreRememberedAsUnusable) {
     EXPECT_FALSE(library.needsSync()) << "the files won't read better next time";
 }
 
+// A transient failure (the model throws) isn't cached as "no face", unlike an unreadable file: the
+// photo is tried again at the next sync.
 TEST_F(LabelSync, APhotoTheModelFailsOnIsReportedAndTriedAgainAtTheNextSync) {
     const fs::path alex = fs::path(dir) / "alex";
     photo(alex / "a.png", 10);
@@ -417,6 +424,7 @@ TEST_F(LabelSync, APhotoTheModelFailsOnIsReportedAndTriedAgainAtTheNextSync) {
     EXPECT_FALSE(library.needsSync());
 }
 
+// The same, when it is the face detector that fails.
 TEST_F(LabelSync, PhotosTheDetectorFailsOnAreTriedAgainAtTheNextSync) {
     photo(fs::path(dir) / "alex" / "a.png", 10);
     photo(fs::path(dir) / "alex" / "b.png", 60, kTroubleBackground);
@@ -535,6 +543,8 @@ TEST_F(LabelSync, AClassOtherThanFaceIsFoundWithoutASync) {
     EXPECT_FALSE(library.needsSync());
 }
 
+// A face label from the version with object labels loads without being embedded again; its
+// leftover class and whole_photo settings are noted and not used.
 TEST_F(LabelSync, FaceLabelsOfAnEarlierVersionKeepTheirEmbeddings) {
     const fs::path me = fs::path(dir) / "me";
     photo(me / "a.png", 10);
@@ -570,6 +580,8 @@ TEST_F(LabelSync, FaceLabelsOfAnEarlierVersionKeepTheirEmbeddings) {
     EXPECT_TRUE(snapshot(me)["label.yml"] == settingsBefore);
 }
 
+// A whole_photo label used the whole photo as the "face" box, so a real face is searched for in
+// every photo again.
 TEST_F(LabelSync, WholePhotoFaceLabelsOfAnEarlierVersionAreLookedAtAgain) {
     const fs::path me = fs::path(dir) / "me";
     photo(me / "a.png", 10);
@@ -589,6 +601,7 @@ TEST_F(LabelSync, WholePhotoFaceLabelsOfAnEarlierVersionAreLookedAtAgain) {
     EXPECT_FALSE(library.needsSync()) << "label.yml's whole_photo isn't used";
 }
 
+// "TARGET" can't be a label name, whether by --enroll, by a rename or by a folder made by hand.
 TEST_F(LabelSync, TargetIsReservedForTheRedTargetBox) {
     const fs::path source = root / "photos";
     photo(source / "a.png", 10);
@@ -623,6 +636,8 @@ TEST_F(LabelSync, TargetIsReservedForTheRedTargetBox) {
     EXPECT_GE(library.find("sam"), 0);
 }
 
+// Enrolling checks all the photos first, copies them (skipping exact duplicates, renaming on a
+// name clash) and syncs.
 TEST_F(LabelSync, EnrollCopiesPhotosIntoTheFolderOnce) {
     const fs::path source = root / "photos";
     photo(source / "a.png", 10);
@@ -702,6 +717,8 @@ TEST_F(LabelSync, RemoveMovesTheFolderAsideWithItsPhotos) {
     EXPECT_THROW(removeLabel("alex", library), std::runtime_error);
 }
 
+// The first format kept the embeddings inside label.yml. It is converted to label.yml (settings)
+// plus .embeddings.yml (the cache), and the old file is kept as .label-v1.yml.
 TEST_F(LabelSync, LabelsFromTheOldFormatAreConvertedAndKeepTheirEmbeddings) {
     // What --enroll used to write: label.yml with the embeddings, next to the photos.
     const Embedding e1{1, 0, 0}, e2{0, 1, 0}, e3{0, 0, 1};

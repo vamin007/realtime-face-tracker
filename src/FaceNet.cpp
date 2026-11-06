@@ -1,3 +1,6 @@
+// FaceNet training, prediction and saving. Why the training looks as it does (noisy copies, three
+// networks, how a network is judged to have learned) is explained where it happens in train().
+
 #include "FaceNet.h"
 
 #include <algorithm>
@@ -10,7 +13,10 @@ namespace fs = std::filesystem;
 
 namespace {
 
+// Version of .face_net.yml; a file of another version is ignored and the network trained again.
 constexpr int kFormat = 1;
+// RPROP (resilient backpropagation) updates each weight by a step that depends only on the sign
+// of its gradient, so there's no learning rate to tune.
 constexpr int kIterations = 300;      // RPROP steps at most; it converges in far fewer
 constexpr uint64_t kSeed = 20261104;  // of the noise, so training is repeatable
 // Each sample is also learned from in noisy copies (noise of this length; the
@@ -23,7 +29,8 @@ constexpr float kNoise = 0.5f;
 constexpr float kLearned = 0.9f;  // share of an output's own samples a network must get right
 constexpr int kAttempts = 3;      // tries per network (new noise each time)
 
-// FNV-1a, 64 bits.
+// FNV-1a, 64 bits: a simple non-cryptographic hash, enough to notice that the training data
+// changed.
 struct Hash {
     uint64_t h = 1469598103934665603ULL;
     void bytes(const void* data, size_t n) {
@@ -64,6 +71,7 @@ std::string FaceNetData::fingerprint() const {
 
 std::string FaceNet::shortfall(const FaceNetData& data) {
     if (data.labels.empty()) return "needs a label";
+    // Every label needs kMinSamples samples, i.e. kMinSamples / 2 photos (each is also mirrored).
     for (size_t i = 0; i < data.labels.size(); ++i)
         if (i >= data.samples.size() || static_cast<int>(data.samples[i].size()) < kMinSamples)
             return "needs " + std::to_string(kMinSamples / 2) + " usable photos of " +
@@ -79,14 +87,18 @@ std::string FaceNet::shortfall(const FaceNetData& data) {
 }
 
 bool FaceNet::train(const FaceNetData& data) {
+    // Start from "off": a failed training must not leave an older network behind.
     *this = FaceNet();
     if (!shortfall(data).empty()) return false;
     const int dim = static_cast<int>(data.samples[0][0].size());
     const int outputs = static_cast<int>(data.labels.size()) + 1;  // the labels, then "other"
     int faces = static_cast<int>(data.others.size());
     for (const auto& s : data.samples) faces += static_cast<int>(s.size());
+    // Every face is one clean row plus kCopies rows that get noise (added per network, below).
     const int rows = faces * (1 + kCopies);
 
+    // x: one embedding per row. y: one-hot targets (a 1 in the column of the right answer; the last
+    // column is "other"). w: a weight per row.
     cv::Mat x(rows, dim, CV_32F), y(rows, outputs, CV_32F, cv::Scalar(0)), w(rows, 1, CV_32F);
     std::vector<int> plain;  // the rows without noise, to check what was learned
     int row = 0;
@@ -117,8 +129,11 @@ bool FaceNet::train(const FaceNetData& data) {
         for (int r = 0; r < rows; ++r) {
             if (std::binary_search(plain.begin(), plain.end(), r)) continue;
             cv::Mat n(1, dim, CV_32F), out = noisy.row(r);
+            // Each component gets deviation kNoise / sqrt(dim), so the whole noise vector is about
+            // kNoise long.
             noise.fill(n, cv::RNG::NORMAL, 0, kNoise / std::sqrt(static_cast<float>(dim)));
             out += n;
+            // Back to length 1, like a real embedding.
             cv::normalize(out, out);
         }
         return cv::ml::TrainData::create(noisy, cv::ml::ROW_SAMPLE, y, cv::noArray(), cv::noArray(),
@@ -130,6 +145,7 @@ bool FaceNet::train(const FaceNetData& data) {
     auto learned = [&](const cv::ml::ANN_MLP& net) {
         std::vector<int> right(outputs, 0), total(outputs, 0);
         cv::Mat out;
+        // Judged on the clean rows only: did it learn the real samples?
         for (int r : plain) {
             net.predict(x.row(r), out);
             int truth = 0, answer = 0;
@@ -145,9 +161,13 @@ bool FaceNet::train(const FaceNetData& data) {
         return true;
     };
 
+    // The ensemble: kNets networks, each trained on different noise (ANN_MLP always starts from the
+    // same weights). A network that doesn't learn its data is thrown away and another attempt made,
+    // up to kNets * kAttempts attempts in all.
     std::vector<cv::Ptr<cv::ml::ANN_MLP>> nets;
     for (int attempt = 0; attempt < kNets * kAttempts && nets.size() < kNets; ++attempt) {
         cv::Ptr<cv::ml::ANN_MLP> net = cv::ml::ANN_MLP::create();
+        // Layers: the embedding as input, one hidden layer of kHidden units, one output per answer.
         net->setLayerSizes(std::vector<int>{dim, kHidden, outputs});
         // tanh-like units of slope 1 and range +-1: with OpenCV's default (1.7159
         // * tanh(2x/3)) RPROP saturated on these inputs and didn't converge.
@@ -155,8 +175,10 @@ bool FaceNet::train(const FaceNetData& data) {
         net->setTrainMethod(cv::ml::ANN_MLP::RPROP);
         net->setTermCriteria(
             {cv::TermCriteria::MAX_ITER + cv::TermCriteria::EPS, kIterations, 1e-5});
+        // A new seed for each attempt, so a retry sees different noise (and a rerun sees the same).
         if (net->train(withNoise(kSeed + attempt)) && learned(*net)) nets.push_back(net);
     }
+    // Too few networks learned the data (two labels of the same face, say): stay off.
     if (static_cast<int>(nets.size()) < kNets) return false;
 
     nets_ = std::move(nets);
@@ -172,7 +194,10 @@ bool FaceNet::train(const FaceNetData& data) {
 std::vector<float> FaceNet::predict(const Embedding& e) const {
     if (!on() || e.empty()) return {};
     if (static_cast<int>(e.size()) != nets_[0]->getLayerSizes().at<int>(0)) return {};
+    // A header over the embedding's memory, no copy (cv::Mat's constructor wants a non-const
+    // pointer; the network doesn't write to it).
     const cv::Mat in(1, static_cast<int>(e.size()), CV_32F, const_cast<float*>(e.data()));
+    // mean: the average of the networks' answers, each first made into a probability distribution.
     std::vector<float> mean(labels_.size() + 1, 0.0f), p(mean.size());
     for (const cv::Ptr<cv::ml::ANN_MLP>& net : nets_) {
         cv::Mat out;
@@ -198,6 +223,7 @@ bool FaceNet::trainedOn(const FaceNetData& data) const {
 
 void FaceNet::save(const std::string& file) const {
     if (!on()) throw std::runtime_error("No face network to save to " + file);
+    // Atomic write: a temp file, then a rename over the old file.
     const std::string temp = file + ".tmp.yml";
     {
         cv::FileStorage out(temp, cv::FileStorage::WRITE);
@@ -222,6 +248,8 @@ void FaceNet::save(const std::string& file) const {
 bool FaceNet::load(const std::string& file) {
     *this = FaceNet();
     if (!fs::exists(file)) return false;
+    // Read into a local object and moved in only if the whole file checks out, so a bad file leaves
+    // this one off.
     FaceNet loaded;
     try {
         cv::FileStorage in(file, cv::FileStorage::READ);
@@ -236,6 +264,7 @@ bool FaceNet::load(const std::string& file) {
             cv::Ptr<cv::ml::ANN_MLP> net = cv::Algorithm::read<cv::ml::ANN_MLP>(node);
             if (!net || !net->isTrained()) return false;
             const cv::Mat sizes = net->getLayerSizes();
+            // Expected shape: input, one hidden layer, and one output per label plus "other".
             if (sizes.total() != 3 ||
                 sizes.at<int>(2) != static_cast<int>(loaded.labels_.size()) + 1)
                 return false;
@@ -244,6 +273,7 @@ bool FaceNet::load(const std::string& file) {
     } catch (const cv::Exception&) {
         return false;
     }
+    // A file that doesn't hold a whole ensemble is rejected.
     if (static_cast<int>(loaded.nets_.size()) != kNets) return false;
     *this = std::move(loaded);
     return true;

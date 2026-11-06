@@ -1,3 +1,8 @@
+// FaceNet: a small neural network that learns the labeled people from their face embeddings, and
+// what "someone else" looks like from the embeddings of strangers. It is a second opinion on the
+// photo-by-photo matching in Labels.h: Recognizer's combineMatch lets it accept a near miss or veto
+// a match. It is trained before tracking starts, or on the Reinforcer's background thread while
+// tracking, never in the frame loop, and saved to labels/.face_net.yml.
 #pragma once
 #include <opencv2/ml.hpp>
 #include <string>
@@ -6,14 +11,16 @@
 #include "Embedder.h"
 
 // What the face network learns from: each label's samples, and faces of
-// people who are none of the labels.
+// people who are none of the labels. (In classifier terms the others are the negatives:
+// examples of the "none of the above" answer.)
 struct FaceNetData {
     std::string model;                            // the embedding model they're from
     std::vector<std::string> labels;              // label names: one output each, in this order
     std::vector<std::vector<Embedding>> samples;  // each label's samples (photos, mirrored too)
     std::vector<Embedding> others;                // other people's faces: the "other" output
     int otherPeople = 0;  // how many separate faces (tracks) the others came from
-    // Changes whenever any of the above does.
+    // Changes whenever any of the above does. A hash of all of it, saved with a trained network
+    // to tell whether the network is still current (FaceNet::trainedOn).
     std::string fingerprint() const;
 };
 
@@ -25,15 +32,15 @@ struct FaceNetData {
 // photos alone, either way. A label's samples count against every other
 // output, so the labels are also each other's negatives.
 //
-// It's OpenCV's ANN_MLP, trained by least squares on one-hot targets, so each
-// output estimates that answer's probability. Each label, and "other", weighs
-// the same in training however many samples it has. With so little data one
-// network's answers vary with its starting weights (and a run now and then
-// never learns one of the outputs), so three are trained from different
-// starting weights, each must fit its own training samples, and their answers
-// are averaged. On synthetic people that took confident answers for people
-// never seen from 12% to 0.4%. Training is seeded: the same data gives the
-// same networks.
+// It's OpenCV's ANN_MLP (a multi-layer perceptron: layers of weighted sums with a nonlinear
+// function between them), trained by least squares on one-hot targets (1 for the right answer,
+// 0 for the others), so each output estimates that answer's probability. Each label, and
+// "other", weighs the same in training however many samples it has. With so little data one
+// network's answers vary with its starting weights (and a run now and then never learns one of
+// the outputs), so three are trained from different starting weights (an ensemble), each must
+// fit its own training samples, and their answers are averaged. On synthetic people that took
+// confident answers for people never seen from 12% to 0.4%. Training is seeded: the same data
+// gives the same networks.
 //
 // It's only trained with enough data: 3 photos of every label, and 20 faces of
 // at least 5 other people. Without them it would call anyone it never saw one
@@ -78,9 +85,11 @@ public:
     bool load(const std::string& file);
 
 private:
+    // The ensemble: kNets networks whose answers are averaged.
     std::vector<cv::Ptr<cv::ml::ANN_MLP>> nets_;
     std::vector<std::string> labels_;
     std::string model_;
+    // FaceNetData::fingerprint() of the data it was trained on.
     std::string fingerprint_;
     int samples_ = 0;
     int others_ = 0;

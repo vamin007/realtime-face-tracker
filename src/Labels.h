@@ -1,3 +1,24 @@
+// Labels: the people the tracker was taught to recognize by their face.
+//
+// On disk a label is a folder of photos of one person, <labels dir>/<name>/:
+//   *.jpg, ...        the photos (yours, and the auto_*.jpg ones the tracker took itself)
+//   label.yml         optional settings, written by hand (threshold, auto_photos)
+//   .embeddings.yml   a cache written by a sync: for each photo, the face found in it and its
+//                     embedding (a 128-number vector, see Embedder.h). Each record is keyed by the
+//                     photo's file name, size and mtime, so a later sync only runs the face
+//                     detector and the embedding network on photos that are new or changed.
+//
+// A sync (Enrollment.cpp) runs at startup when photos changed, and with --sync-labels or
+// --enroll. LabelLibrary::load() then builds the in-memory labels from the cached embeddings
+// alone, so starting the tracker doesn't take a model run per photo.
+//
+// Recognition compares a live face's embedding with each label's samples by cosine similarity
+// (the dot product of two length-1 vectors). A label's score is the mean of its 3 most similar
+// samples; the best label wins if it reaches its threshold and leads the runner-up by a margin
+// (LabelLibrary::match). The Recognizer (Recognizer.h) adds votes over time on top of that.
+//
+// Threading: a LabelLibrary is read and changed only by the tracking thread. Worker threads are
+// handed copies (crops, FaceNetData), never references into the library.
 #pragma once
 #include <opencv2/core.hpp>
 #include <string>
@@ -5,15 +26,18 @@
 
 #include "Embedder.h"
 
-// One photo of a labeled person.
+// One sample of a labeled person: the embedding of the face in one photo, or of that photo
+// mirrored left-right (a photo normally gives both).
 struct LabelSample {
     std::string image;     // file name in the label's folder
     cv::Rect roi;          // where the face is in that photo
     bool flipped = false;  // the left-right mirrored copy (the live camera view is mirrored)
+    // length-1 vector from the embedding model; compare with similarity()
     Embedding embedding;
 };
 
 // A specific person the tracker was taught to recognize by their face, e.g. "alex".
+// Built by LabelLibrary::load() from a label folder's cached embeddings.
 struct CustomLabel {
     std::string name;
     std::string model;                 // the embedding model its samples were made with
@@ -22,6 +46,9 @@ struct CustomLabel {
     bool autoPhotos = true;            // photos are taken of the face while it's recognized
 };
 
+// The outcome of LabelLibrary::match for one face. `label` is set only if the best label reached
+// its threshold and led the runner-up by the margin; `best` is set whenever there is any label,
+// so the closest one (and its score) can still be shown for a face that didn't match.
 struct LabelMatch {
     int label = -1;      // index into LabelLibrary::labels(); -1 if nothing matched
     float score = 0;     // the best label's score
@@ -39,14 +66,16 @@ struct LabelSettings {
     std::vector<std::string> oldKeys;  // which of "class" and "whole_photo" the file has
 };
 
-// An image file in a label's folder. Its size and time show whether it changed.
+// An image file in a label's folder. Its size and time show whether it changed: a sync
+// compares them with the cached values instead of reading and embedding the photo again.
 struct PhotoFile {
     std::string name;
     long long size = 0;
     long long mtime = 0;  // modification time, ns since the epoch
 };
 
-// What a sync found in one photo.
+// What a sync found in one photo. Both orientations are embedded: the live view is mirrored by
+// default (--no-mirror turns that off), and a photo may be either way round.
 struct PhotoRecord {
     PhotoFile file;
     bool used = false;              // the face was found and embedded
@@ -57,9 +86,9 @@ struct PhotoRecord {
 };
 
 // .embeddings.yml in a label's folder, written by a sync: what it found in each
-// photo, and the model it used (when that changes, every photo is redone). An
-// earlier version, which also had object labels, reads and writes the same
-// file, so the fields it needs are kept.
+// photo (keyed by its name, size and mtime), and the model it used (when that
+// changes, every photo is redone). An earlier version, which also had object
+// labels, reads and writes the same file, so the fields it needs are kept.
 struct LabelCache {
     std::string model;        // embedding model
     std::string baseClass;    // the class it looked for: face (or an earlier version's object
@@ -85,7 +114,8 @@ struct SyncPlan {
 };
 
 // Compares the photos in a label's folder with what the last sync found.
-// `model` is the embedding model (empty: not checked).
+// `model` is the embedding model (empty: not checked). A photo is unchanged if its name, size
+// and mtime match its cached record. Pure: it reads no files and runs no model.
 SyncPlan planSync(const LabelCache& cache, const std::vector<PhotoFile>& photos,
                   const std::string& model);
 
@@ -104,6 +134,7 @@ struct LabelFolder {
 
 // Labels on disk: one folder per label, <dir>/<name>/, holding photos of the
 // person, an optional label.yml (settings) and .embeddings.yml (written by a sync).
+// Used by the tracking thread only; other threads get copies of what they need.
 class LabelLibrary {
 public:
     explicit LabelLibrary(std::string dir) : dir_(std::move(dir)) {}
@@ -121,7 +152,8 @@ public:
     const std::vector<CustomLabel>& labels() const { return labels_; }
     int find(const std::string& name) const;  // -1 if unknown
     // Adds a photo's samples to a label in memory (its embedding and mirrored
-    // copy, as a sync would have), or removes them. Files aren't touched.
+    // copy, as a sync would have), or removes them. Files aren't touched. The Recognizer
+    // uses these for automatic photos, so a new photo counts at once.
     void addPhoto(int label, const PhotoRecord& record);
     void removePhoto(int label, const std::string& image);
 
@@ -135,7 +167,8 @@ public:
 
     // The best label for a face's embedding. A label's score is the mean of its
     // 3 most similar samples; the best must reach its threshold and beat the
-    // runner-up by at least `minMargin`.
+    // runner-up by at least `minMargin`. `defaultThreshold` is used for labels without their
+    // own. Even without a match the result names the closest label (LabelMatch::best).
     LabelMatch match(const Embedding& e, float defaultThreshold, float minMargin) const;
 
 private:
@@ -145,7 +178,9 @@ private:
     std::vector<std::string> loosePhotos_;
 };
 
-// Score of one label for an embedding: the mean of its 3 most similar samples.
+// Score of one label for an embedding: the mean of its 3 most similar samples. Averaging a few
+// of the best is steadier than the single best sample, and unlike a mean over all samples it
+// isn't dragged down by photos from other angles.
 float labelScore(const CustomLabel& label, const Embedding& e);
 // The similarity a label needs: its own threshold, or `fallback` (the model's).
 inline float thresholdOf(const CustomLabel& label, float fallback) {
@@ -165,7 +200,8 @@ bool isPhotoName(const std::string& fileName);            // by extension
 // A photo the tracker took of a recognized face: auto_YYYYMMDD_HHMMSS.jpg,
 // perhaps with _2, _3, ... before the extension.
 bool isAutoPhotoName(const std::string& fileName);
-// Image files in a folder, sorted by name.
+// Image files in a folder, sorted by name. Hidden (dot) files are skipped, such as the temp
+// file of a photo that is still being written.
 std::vector<PhotoFile> listPhotos(const std::string& folder);
 
 // label.yml. Missing file: the defaults. Throws for a file it can't use. An
@@ -174,11 +210,14 @@ LabelSettings readSettings(const std::string& file);
 void writeSettings(const std::string& file, const LabelSettings& settings);
 // .embeddings.yml. Returns false (and an empty cache) if it's missing or unreadable.
 bool readCache(const std::string& file, LabelCache& cache);
+// Atomic: written to a temp file and renamed over the old cache, so a crash never leaves a
+// half-written one.
 void writeCache(const std::string& file, const LabelCache& cache);
 // Adds a photo's record to a label folder's .embeddings.yml, as if a sync had
 // looked at it: its size and time are taken from the file. A record of the
 // same name is replaced, and `removed`'s (a photo deleted) is dropped. Returns
-// false if the folder has no cache to add to (it was never synced).
+// false if the folder has no cache to add to (it was never synced). The Reinforcer's thread
+// calls this after saving an automatic photo, so the next sync sees the photo as already done.
 bool appendPhotoRecord(const std::string& folder, PhotoRecord record,
                        const std::string& removed = "");
 
@@ -188,7 +227,8 @@ bool appendPhotoRecord(const std::string& folder, PhotoRecord record,
 bool migrateOldLabel(const std::string& folder);
 
 // How well each photo agrees with the label's other photos: the mean similarity
-// of its embedding to theirs (not to its own mirrored copy). One per photo.
+// of its embedding to theirs (not to its own mirrored copy). One per photo. A sync uses it
+// to point out a photo that probably shows someone else.
 struct PhotoAgreement {
     std::string image;
     float agreement = 0;
@@ -198,8 +238,10 @@ std::vector<PhotoAgreement> photoAgreement(const CustomLabel& label);
 // How much label b gets in the way of recognizing label a. Each photo of a is
 // scored as the recognizer would score a live crop: against a's other photos
 // and against b. It's ambiguous when b reaches `threshold` and a doesn't beat b
-// by `margin`: the recognizer would give no label, or b's.
+// by `margin`: the recognizer would give no label, or b's. A photo is held out of a's samples
+// while it is scored (leave-one-out), so it isn't compared with itself.
 struct LabelConfusion {
+    // photos of a that were scored, and how many of them came out ambiguous
     int photos = 0;
     int ambiguous = 0;
     float ownScore = 0;    // mean score of a's photos against a's other photos

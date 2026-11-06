@@ -1,3 +1,6 @@
+// Recognizer implementation: the worker thread, the per-result logic (apply, vote, photos) and
+// the per-frame update(). The overview and the threading rules are in Recognizer.h.
+
 #include "Recognizer.h"
 
 #include <algorithm>
@@ -14,6 +17,8 @@ namespace {
 
 constexpr float kCropMargin = 0.3f;  // context kept around a box when copying it for the worker
 
+// A box's size as one number (the side of a square of the same area), for noticing a face that
+// grew or shrank a lot.
 float sizeOf(const cv::Rect2f& r) { return std::sqrt(std::max(r.area(), 1.0f)); }
 
 }  // namespace
@@ -22,8 +27,11 @@ LabelVerdict combineMatch(const LabelMatch& m, float threshold, const std::vecto
                           const RecognizerParams& p) {
     LabelVerdict v;
     v.label = m.label;
+    // No network answer, no label, or a network that doesn't cover this label (it was trained for
+    // fewer labels): the photos decide alone.
     if (probs.empty() || m.best < 0 || m.best + 1 >= static_cast<int>(probs.size())) return v;
     if (m.label >= 0) {
+        // The last output is "other": someone who isn't any label.
         if (probs.back() >= p.netSure) v.label = -1, v.vetoed = true;
     } else if (m.score >= threshold - p.relax && m.score - m.runnerUp >= p.minMargin &&
                probs[m.best] >= p.netSure) {
@@ -57,6 +65,7 @@ Recognizer::~Recognizer() {
     }
     wake_.notify_all();
     thread_.join();
+    // Tracks still alive at shutdown hand over the faces they kept too.
     for (auto& [trackId, id] : identities_) handOver(id);
 }
 
@@ -70,6 +79,7 @@ void Recognizer::work() {
             job = std::move(jobs_.front());
             jobs_.pop_front();
         }
+        // Embedding runs outside the lock: only the two queues are shared.
         Result result;
         try {
             result.embedding = embedder_.embed(job.crop, job.box, job.keypoints);
@@ -87,6 +97,8 @@ void Recognizer::work() {
                 }
             }
         } catch (const std::exception& ex) {
+            // The result stays empty, which apply() ignores; the track is asked again at its next
+            // recheck.
             std::cerr << "Warning: recognition failed: " << ex.what() << '\n';
         }
         if (result.mirrored.empty()) job.crop.release();  // only a photo needs it
@@ -105,6 +117,8 @@ void Recognizer::waitIdle() {
 
 void Recognizer::useLatestNet() {
     if (!reinforcer_) return;
+    // version() is a cheap atomic read; net() and status() take the reinforcer's mutex, so they're
+    // only fetched after something new was published.
     const int version = reinforcer_->version();
     if (version == netVersion_) return;
     netVersion_ = version;
@@ -128,11 +142,13 @@ void Recognizer::apply(Result& result) {
     if (result.embedding.empty()) return;
     const Embedding& e = result.embedding;
     ++id.checks;
+    // What the photos say (m), then what the network says (probs); combineMatch merges the two.
     const LabelMatch m = library_.match(e, threshold_, params_.minMargin);
     const std::vector<float> probs = net_ ? net_->predict(e) : std::vector<float>{};
     const float threshold =
         m.best >= 0 ? thresholdOf(library_.labels()[m.best], threshold_) : threshold_;
     const LabelVerdict verdict = combineMatch(m, threshold, probs, params_);
+    // A track that matched a label even once is never kept as "someone else" (see handOver).
     if (m.label >= 0 || verdict.relaxed) id.everMatched = true;
     id.netLabel.clear();
     id.netProb = -1;
@@ -152,9 +168,13 @@ void Recognizer::apply(Result& result) {
     }
     const std::string assigned = id.label >= 0 ? library_.labels()[id.label].name : "";
 
+    // This result is one vote for the label the photos (and network) support, or for none.
     vote(trackId, id, verdict.label, m.score);
     // A labeled face may be photographed for its label; a face unlike every
-    // label is kept as someone else's (handed over once its track ends).
+    // label is kept as someone else's (handed over once its track ends). Only clear cases
+    // are kept: the track never matched a label, the best label is well below its threshold,
+    // the view is good (detected, not lit, wide and sharp enough), and no more than
+    // `perTrack` faces, `interval` apart, come from one track.
     id.photo.clear();
     if (id.label >= 0) {
         considerPhoto(id, result, m);
@@ -168,6 +188,8 @@ void Recognizer::apply(Result& result) {
         id.otherAt = result.job.time;
     }
 
+    // CSV columns: time, track, class, closest label, its score, runner-up's score, matched (0/1),
+    // assigned label, network's answer, its probability, sharpness, photo outcome.
     if (debug_)
         *debug_ << now_ << ',' << trackId << ',' << classes_.name(classes_.face()) << ','
                 << id.closest << ',' << id.closestScore << ',' << m.runnerUp << ','
@@ -176,6 +198,8 @@ void Recognizer::apply(Result& result) {
 }
 
 void Recognizer::vote(int trackId, TrackIdentity& id, int matched, float score) {
+    // Votes pile up per label over the track's life. `streak` counts the latest run of agreeing
+    // results (the photo gate wants a steady label).
     if (matched >= 0) ++id.votes[matched];
     if (matched >= 0 && matched == id.streakLabel) {
         ++id.streak;
@@ -184,6 +208,8 @@ void Recognizer::vote(int trackId, TrackIdentity& id, int matched, float score) 
         id.streak = matched >= 0 ? 1 : 0;
     }
 
+    // Already labeled: a result for another label, or none, is a miss. Enough misses in a row take
+    // the label away, and its votes are cleared so that it has to be earned again.
     if (id.label >= 0) {
         if (matched == id.label) {
             id.misses = 0;
@@ -228,6 +254,8 @@ bool Recognizer::mayPhotograph(const TrackIdentity& id, const Job& job) const {
     return capturePolicy(in, params_.capture) == CaptureGate::Take;
 }
 
+// After a result for a labeled track: runs the capture gates (Reinforcement.h) and takes the
+// photo if all pass. TrackIdentity::photo records the outcome, which the debug view shows.
 void Recognizer::considerPhoto(TrackIdentity& id, const Result& r, const LabelMatch& m) {
     const CustomLabel& label = library_.labels()[id.label];
     CaptureInput in;
@@ -255,11 +283,14 @@ void Recognizer::considerPhoto(TrackIdentity& id, const Result& r, const LabelMa
     takePhoto(id, r);
 }
 
+// Takes the photo: the label learns it at once (in memory), and the reinforcer's thread writes
+// the JPEG and its record and retrains the face network.
 void Recognizer::takePhoto(TrackIdentity& id, const Result& r) {
     const int index = id.label;
     CustomLabel& label = library_.labels()[index];
     const std::string folder = library_.folder(label.name);
     PhotoRecord record;
+    // auto_<date>_<time>.jpg, or _2, _3, ... if that name is taken in memory or on disk.
     record.file.name = autoPhotoName(std::time(nullptr), [&](const std::string& name) {
         return std::any_of(label.samples.begin(), label.samples.end(),
                            [&](const LabelSample& s) { return s.image == name; }) ||
@@ -286,6 +317,8 @@ void Recognizer::takePhoto(TrackIdentity& id, const Result& r) {
         return;
     }
     if (!drop.empty()) library_.removePhoto(index, drop);
+    // A copy of every label's samples goes along, so the reinforcer's thread never reads the
+    // library.
     reinforcer_->savePhoto({folder, r.job.crop, record, drop},
                            faceNetData(library_, embedder_.modelId()));
     id.photo = describe(CaptureGate::Take);
@@ -330,8 +363,12 @@ void Recognizer::update(const cv::Mat& frame, const std::vector<Track>& tracks, 
         if (!t.visible || !t.matched) continue;
         const TrackIdentity& id = identities_[t.id];
         if (id.pending) continue;
+        // A face whose size changed a lot since its last crop is looked at again before the
+        // interval.
         const bool resized =
             id.askedSize > 0 && std::abs(sizeOf(t.box) / id.askedSize - 1) > params_.resizeTrigger;
+        // Unlabeled faces are checked often to find a label quickly; labeled ones less often, to
+        // confirm.
         const double interval = id.label >= 0 ? params_.labeledRecheck : params_.recheckInterval;
         if (id.askedAt < 0 || now - id.askedAt >= interval || resized) due.push_back(&t);
     }
@@ -342,9 +379,13 @@ void Recognizer::update(const cv::Mat& frame, const std::vector<Track>& tracks, 
         return ia.askedAt < ib.askedAt;
     });
 
+    // Held while crops are queued: the worker takes jobs from jobs_ under it.
     std::lock_guard<std::mutex> lock(mutex_);
     for (const Track* t : due) {
         if (inFlight_ >= params_.maxPending) break;
+        // The crop is the box plus kCropMargin on each side (clipped to the frame). Box and
+        // landmarks are shifted into the crop's coordinates, so embed() sees the same face as in
+        // the frame.
         const cv::Rect2f grown(
             t->box.x - t->box.width * kCropMargin, t->box.y - t->box.height * kCropMargin,
             t->box.width * (1 + 2 * kCropMargin), t->box.height * (1 + 2 * kCropMargin));
@@ -359,7 +400,11 @@ void Recognizer::update(const cv::Mat& frame, const std::vector<Track>& tracks, 
         job.box = cv::Rect2f(t->box.tl() - origin, t->box.size());
         for (const cv::Point2f& p : t->keypoints) job.keypoints.push_back(p - origin);
         job.conf = t->conf;
+        // "Detected": matched to a confident detection in this frame, not a coasting prediction or
+        // a weak match. Only such a crop can become a photo.
         job.detected = t->matched && !t->coasting && t->lastStrong >= t->lastSeen;
+        // "Lit" also covers litCooldown seconds after the light, while the camera's exposure
+        // settles.
         job.lit = id.litAt >= 0 && now - id.litAt < params_.litCooldown;
         job.photo = mayPhotograph(id, job);
         jobs_.push_back(std::move(job));

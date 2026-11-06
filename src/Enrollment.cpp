@@ -1,3 +1,7 @@
+// Implementation of the label commands. A sync is planSync() (Labels.cpp: which photos are new,
+// changed or gone) plus examine() here (find the face in one photo, embed it and its mirror). The
+// rest is the report the user reads: usable photos, outliers, look-alike labels and tips.
+
 #include "Enrollment.h"
 
 #include <algorithm>
@@ -33,7 +37,8 @@ std::string number(float x) {
     return text;
 }
 
-// How much a detection stands out in a photo: confident and large.
+// How much a detection stands out in a photo: confident and large. Several faces may be in
+// a photo (a bystander); the most prominent one is taken to be the person. Weak ones count half.
 float prominence(const Detection& d, cv::Size image) {
     return (d.weak ? 0.5f : 1.0f) * d.conf * d.box.area() / (image.width * image.height);
 }
@@ -83,6 +88,8 @@ std::string retryNote(const std::string& error) {
     return "looking at it failed (" + error + "); the next sync tries it again";
 }
 
+// A photo where no face was found (note "no face found"), as opposed to an unreadable photo or a
+// face that was too small.
 bool faceMissing(const PhotoRecord& r) { return !r.used && r.note.rfind("no ", 0) == 0; }
 
 // Looks at one photo: finds the face and embeds it, and the photo mirrored
@@ -136,6 +143,8 @@ Change syncFolder(const LabelFolder& f, const SyncPlan& plan, Detector& detector
     // The class is written as an earlier version, which also reads this file,
     // would: set in label.yml or not.
     LabelCache cache{embedder.modelId(), kFaceClass, f.settings.oldClass.empty(), false, plan.keep};
+    // The records still valid (plan.keep) were carried over above; only the photos in plan.look are
+    // examined.
     for (const PhotoFile& photo : plan.look) {
         PhotoRecord r;
         std::string failed;  // why looking at it failed, when it may not fail next time
@@ -152,6 +161,7 @@ Change syncFolder(const LabelFolder& f, const SyncPlan& plan, Detector& detector
         const bool changed = std::count(plan.changed.begin(), plan.changed.end(), photo.name) > 0;
         change.lines.push_back(photo.name + (changed ? " (changed)" : "") + ": " +
                                (r.used ? "" : "not used, ") + r.note);
+        // A photo whose looking failed is left out of the cache, so the next sync tries it again.
         if (failed.empty()) cache.photos.push_back(std::move(r));
     }
     std::sort(cache.photos.begin(), cache.photos.end(),
@@ -160,6 +170,7 @@ Change syncFolder(const LabelFolder& f, const SyncPlan& plan, Detector& detector
     return change;
 }
 
+// Photos the tracker took itself (auto_*.jpg), counted for --list-labels.
 int autoPhotoCount(const LabelFolder& f) {
     return static_cast<int>(std::count_if(f.photos.begin(), f.photos.end(), [](const PhotoFile& p) {
         return isAutoPhotoName(p.name);
@@ -246,6 +257,7 @@ void printReport(const LabelFolder& f, const Change* change, const LabelLibrary&
 // apart. Only pairs with a label in `changed`, unless `all`.
 void warnLookAlikes(const LabelLibrary& library, const std::map<std::string, Change>& changed,
                     bool all, const IEmbedder& embedder) {
+    // The margin the recognizer requires, so "look alike" means recognition would really struggle.
     const float margin = RecognizerParams{}.minMargin;
     const std::vector<CustomLabel>& labels = library.labels();
     auto lookAlike = [](const LabelConfusion& c) {
@@ -320,6 +332,8 @@ int syncLabels(LabelLibrary& library, Detector& detector, const ClassRegistry& c
         if (plan.empty()) continue;
         changes[f.name] = syncFolder(f, plan, detector, classes, embedder);
     }
+    // Re-read the folders: the caches just written become the labels, and the report below is made
+    // from them.
     library.load();
 
     if (all && library.folders().empty())
@@ -386,6 +400,7 @@ void enroll(const std::string& name, const std::vector<std::string>& images, Det
         std::printf(" (%d were there already)", static_cast<int>(images.size()) - copied);
     std::printf("\n");
 
+    // Sync now, so the copied photos are looked at: only new or changed photos cost any work.
     library.load();
     syncLabels(library, detector, classes, embedder, false);
     if (library.find(name) < 0)
@@ -447,6 +462,8 @@ void renameLabel(const std::string& from, const std::string& to, const LabelLibr
     // (A different case of the same name is the same folder on macOS.)
     if (fs::exists(target) && !fs::equivalent(source, target))
         throw std::runtime_error("There is already a label or folder named '" + to + "'");
+    // The cache is keyed by photo name, not label name, so the embeddings move with the folder and
+    // nothing is embedded again.
     fs::rename(source, target);
     std::cout << "Renamed label '" << from << "' to '" << to << "' (" << target.string() << ")\n";
 }
@@ -457,6 +474,8 @@ std::string removeLabel(const std::string& name, const LabelLibrary& library) {
     const size_t photos = library.folders()[index].photos.size();
     const fs::path removed = fs::path(library.dir()) / ".removed";
     fs::create_directories(removed);
+    // Nothing is deleted. A name removed before gets _2, _3, ... so no earlier backup is
+    // overwritten.
     fs::path target = removed / name;
     for (int n = 2; fs::exists(target); ++n) target = removed / (name + "_" + std::to_string(n));
     fs::rename(library.folder(name), target);
